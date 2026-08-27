@@ -63,6 +63,7 @@ def root_landing_page():
 @app.get("/search")
 def search_records(
     shard_name: str = Query(..., description="Parquet file name (e.g., alt_master_shard_0.parquet)"),
+    api_key: Optional[str] = Query(None, description="API Key"),
     mobile: Optional[str] = Query(None, description="Search by Mobile Number"),
     alt: Optional[str] = Query(None, description="Search by Alternate Number"),
     name: Optional[str] = Query(None, description="Search by Name"),
@@ -74,18 +75,18 @@ def search_records(
 ):
     conn = None
     try:
-        # Aapke dataset repo ka direct URL
         parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
         
         conn = duckdb.connect()
-        # Memory capped to prevent 502/OOM crashes on Render Free Tier (512MB RAM)
+        # Render Free Tier memory control
         conn.execute("SET memory_limit='250MB';")
         conn.execute("SET threads=1;")
         conn.execute("INSTALL httpfs; LOAD httpfs;")
         conn.execute("SET allow_asterisks_in_http_paths = true;")
         
+        # Fixed Hugging Face Authorization Setting in DuckDB
         if HF_TOKEN:
-            conn.execute(f"SET http_headers = {{'Authorization': 'Bearer {HF_TOKEN}'}};")
+            conn.execute(f"SET http_bearer_token = '{HF_TOKEN}';")
 
         # Dynamic Search Conditions
         conditions = []
