@@ -1,5 +1,4 @@
 fastapi
 uvicorn
-polars
-fsspec
-pyarrow
+duckdb
+requests
