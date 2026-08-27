@@ -1,4 +1,6 @@
-flask
-pandas
+fastapi
+uvicorn
+duckdb
+huggingface_hub
 pyarrow
-requests
+pandas
