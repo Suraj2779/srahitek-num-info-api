@@ -12,7 +12,7 @@ app = FastAPI(title="SRA CyberTech Database Search API")
 # =====================================================================
 DEVELOPER_NAME = "@SRA_CyberTech_Pvt_Ltd_Owner_bot"
 CHANNEL_URL = "https://t.me/SRACyberTechPvtLtd"
-DATASET_BASE_URL = "hf://datasets/MRSHREY197/Hitekdatabase"
+DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
 # Hugging Face Access Token Setup
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -172,11 +172,13 @@ def search_records(
     try:
         parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
         
-        # Connect & limit memory to prevent 502 crash on Render
         conn = duckdb.connect()
-        conn.execute("SET memory_limit='350MB';")
+        conn.execute("SET memory_limit='250MB';")
         conn.execute("SET threads=1;")
         conn.execute("INSTALL httpfs; LOAD httpfs;")
+
+        if HF_TOKEN:
+            conn.execute(f"SET http_headers={{'Authorization': 'Bearer {HF_TOKEN}'}};")
 
         conditions = []        
         if name:
@@ -198,12 +200,11 @@ def search_records(
             raise HTTPException(status_code=400, detail="At least one search parameter must be provided.")
         
         where_clause = " AND ".join(conditions)
-        query = f"SELECT * FROM '{parquet_url}' WHERE {where_clause} LIMIT {limit}"
+        query = f"SELECT * FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
         
         df = conn.execute(query).df()
         df = df.fillna("")
         
-        # Increment daily usage count
         key_data["used_today"] += 1
         
         return {
