@@ -7,7 +7,6 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Database Search API")
 
-# Hugging Face Configuration
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
@@ -75,20 +74,17 @@ def search_records(
 ):
     conn = None
     try:
-        # Build parquet URL with token if available
+        # Construct Parquet URL with Token if required
         if HF_TOKEN:
             parquet_url = f"{DATASET_BASE_URL}/{shard_name}?token={HF_TOKEN}"
         else:
             parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
         
         conn = duckdb.connect()
-        # Memory capped to prevent Render 502 Bad Gateway / OOM crashes
-        conn.execute("SET memory_limit='250MB';")
+        # Strict memory limit to prevent Render 502/OOM crashes
+        conn.execute("SET memory_limit='200MB';")
         conn.execute("SET threads=1;")
-        conn.execute("INSTALL httpfs; LOAD httpfs;")
-        conn.execute("SET allow_asterisks_in_http_paths = true;")
 
-        # Build dynamic SQL search conditions
         conditions = []
         if mobile:
             conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
@@ -110,18 +106,18 @@ def search_records(
                 status_code=400,
                 content={
                     "status": "error",
-                    "message": "At least one search parameter (mobile, alt, name, fname, id, email, address) is required."
+                    "message": "At least one search parameter is required."
                 }
             )
         
         where_clause = " AND ".join(conditions)
         query = f"SELECT * FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
         
-        df = conn.execute(query).df()
-        df = df.fillna("")
-        results = df.to_dict(orient="records")
+        cursor = conn.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
         
-        if not results:
+        if not rows:
             return JSONResponse(
                 status_code=404,
                 content={
@@ -129,6 +125,8 @@ def search_records(
                     "message": "No records found matching your query."
                 }
             )
+            
+        results = [dict(zip(columns, [str(val) if val is not None else "" for val in row])) for row in rows]
             
         return {
             "status": "success",
