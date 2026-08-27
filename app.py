@@ -9,10 +9,9 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
-# ======== আপনার দেওয়া ডেটাসেট (এখন কাজ করছে) ========
-DATASET_BASE = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
+# ======== CutehackX ডেটাসেট (এটি কাজ করে) ========
+DATASET_BASE = "https://huggingface.co/datasets/CutehackX/hitek-data-bucket/resolve/main"
 
-# সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 # ========== ল্যান্ডিং পেজ ==========
@@ -30,7 +29,7 @@ h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
 <body>
     <h1>🚀 SRA CYBERTECH</h1>
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: MRSHREY197/Hitekdatabase</p>
+    <p>Dataset: MRSHREY197/Hitekdatabase (via CutehackX)</p>
     <p>Developer: Team SRA (Salman | Raj | Akash)</p>
     <p style="color:#666;">Try: /search?mobile=9831477801  or  /search?name=rahul</p>
 </body>
@@ -52,7 +51,7 @@ def root():
 def health():
     return {"status": "healthy", "timestamp": time.time()}
 
-# ========== ডিবাগ ==========
+# ========== ডিবাগ (এখন numpy ইন্সটল থাকবে) ==========
 @app.get("/debug/schema")
 def debug_schema():
     try:
@@ -120,7 +119,6 @@ def search(
             scanned += 1
             try:
                 url = f"{DATASET_BASE}/{shard}"
-                # HEAD চেক
                 resp = requests.head(url, timeout=5)
                 if resp.status_code != 200:
                     failed += 1
