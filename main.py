@@ -10,29 +10,28 @@ from functools import lru_cache
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
-# ========== আপনার দেওয়া বাকেট URL ==========
+# ========== আপনার দেওয়া লিংক ==========
 DATASET_BASE = "https://huggingface.co/buckets/MRSHREY197/Hitekdatabase-bucket/resolve/main"
 
-# ২০টি ফাইলের তালিকা (alt_0-9, final_0-9)
+# সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 # ========== ল্যান্ডিং পেজ ==========
 LANDING_HTML = """
 <!DOCTYPE html>
 <html>
-<head><title>SRA CyberTech - Ultimate API</title>
+<head><title>SRA CyberTech Ultimate API</title>
 <style>
 body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%;}
 h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
 .status{color:#0f0;animation:blink 1s infinite;}
 @keyframes blink{50%{opacity:0;}}
-.highlight{color:#00ffcc;}
 </style>
 </head>
 <body>
     <h1>🚀 SRA CYBERTECH</h1>
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: <span class="highlight">MRSHREY197/Hitekdatabase-bucket</span></p>
+    <p>Dataset: <span style="color:#00ffcc;">MRSHREY197/Hitekdatabase-bucket</span></p>
     <p>Developer: Team SRA (Salman | Raj | Akash)</p>
     <p style="color:#666;">Use: /search?name=rahul</p>
 </body>
@@ -50,22 +49,12 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root():
     return HTMLResponse(content=LANDING_HTML)
 
-# ========== ক্যাশিং ==========
-@lru_cache(maxsize=100)
-def cached_result(query_hash: str):
-    return None
-
 # ========== হেলথ চেক ==========
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "dataset": "MRSHREY197/Hitekdatabase-bucket",
-        "shards": len(ALL_SHARDS)
-    }
+    return {"status": "healthy", "timestamp": time.time(), "dataset": "MRSHREY197/Hitekdatabase-bucket"}
 
-# ========== মেইন সার্চ ফাংশন ==========
+# ========== মেইন সার্চ (সব ২০টি ফাইলেই সার্চ) ==========
 @app.get("/search")
 def search_records(
     mobile: Optional[str] = Query(None, description="Mobile Number"),
@@ -106,10 +95,9 @@ def search_records(
     all_results = []
     failed_shards = 0
     scanned_count = 0
-    file_not_found = 0
-    other_errors = 0
+    shard_names = []
 
-    # ===== সব ফাইলে সার্চ =====
+    # ===== সব ২০টি ফাইলেই সার্চ =====
     conn = None
     try:
         conn = duckdb.connect()
@@ -124,19 +112,17 @@ def search_records(
             try:
                 url = f"{DATASET_BASE}/{shard_file}"
                 
-                # ফাইল আছে কিনা চেক (হালকা HEAD রিকোয়েস্ট)
+                # ফাইল আছে কিনা চেক (HEAD রিকোয়েস্ট)
                 try:
                     head_resp = requests.head(url, timeout=5)
                     if head_resp.status_code != 200:
                         failed_shards += 1
-                        file_not_found += 1
                         continue
-                except requests.RequestException:
+                except:
                     failed_shards += 1
-                    other_errors += 1
                     continue
                 
-                # DuckDB কোয়েরি
+                # কোয়েরি চালান
                 query = f"""
                     SELECT 
                         mobile, name, fname, address, alt, circle, id, email,
@@ -155,13 +141,14 @@ def search_records(
                         for row in rows
                     ]
                     all_results.extend(formatted)
+                    shard_names.append(shard_file)
                     
+                    # লিমিট পূর্ণ হলে থামুন
                     if len(all_results) >= limit:
                         break
                         
             except Exception as e:
                 failed_shards += 1
-                other_errors += 1
                 continue
                 
     except Exception as e:
@@ -169,7 +156,7 @@ def search_records(
             status_code=500,
             content={
                 "status": "error",
-                "message": f"Database connection error: {str(e)}",
+                "message": f"Database error: {str(e)}",
                 "Developer": "Team SRA"
             }
         )
@@ -184,13 +171,10 @@ def search_records(
             status_code=404,
             content={
                 "status": "not_found",
-                "message": "No records found matching your query",
+                "message": "No records found",
                 "shards_checked": scanned_count,
                 "shards_failed": failed_shards,
-                "file_not_found": file_not_found,
-                "other_errors": other_errors,
-                "time_ms": elapsed_ms,
-                "dataset": "MRSHREY197/Hitekdatabase-bucket"
+                "time_ms": elapsed_ms
             }
         )
 
@@ -200,8 +184,7 @@ def search_records(
         "dataset": "MRSHREY197/Hitekdatabase-bucket",
         "shards_checked": scanned_count,
         "shards_failed": failed_shards,
-        "file_not_found": file_not_found,
-        "other_errors": other_errors,
+        "shards_with_data": list(set(shard_names)),
         "time_ms": elapsed_ms,
         "count": len(all_results),
         "results": all_results[:limit]
