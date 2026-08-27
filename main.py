@@ -7,7 +7,7 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Database Search API")
 
-# Setup Hugging Face Token for your dataset
+# Hugging Face Configuration
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
@@ -75,20 +75,20 @@ def search_records(
 ):
     conn = None
     try:
-        parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
+        # Build parquet URL with token if available
+        if HF_TOKEN:
+            parquet_url = f"{DATASET_BASE_URL}/{shard_name}?token={HF_TOKEN}"
+        else:
+            parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
         
         conn = duckdb.connect()
-        # Render Free Tier memory control
+        # Memory capped to prevent Render 502 Bad Gateway / OOM crashes
         conn.execute("SET memory_limit='250MB';")
         conn.execute("SET threads=1;")
         conn.execute("INSTALL httpfs; LOAD httpfs;")
         conn.execute("SET allow_asterisks_in_http_paths = true;")
-        
-        # Fixed Hugging Face Authorization Setting in DuckDB
-        if HF_TOKEN:
-            conn.execute(f"SET http_bearer_token = '{HF_TOKEN}';")
 
-        # Dynamic Search Conditions
+        # Build dynamic SQL search conditions
         conditions = []
         if mobile:
             conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
@@ -110,7 +110,7 @@ def search_records(
                 status_code=400,
                 content={
                     "status": "error",
-                    "message": "Kam se kam ek search parameter (mobile, alt, name, fname, id, email, address) dena zaroori hai."
+                    "message": "At least one search parameter (mobile, alt, name, fname, id, email, address) is required."
                 }
             )
         
