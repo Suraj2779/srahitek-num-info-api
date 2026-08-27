@@ -8,10 +8,10 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
-# ======== ডেটাসেট (CutehackX – আগে কাজ করছিল) ========
-DATASET_BASE = "https://huggingface.co/datasets/CutehackX/hitek-data-bucket/resolve/main"
+# ======== শুধু এই ডেটাসেট ========
+DATASET_BASE = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
-# সব ২০টি ফাইল
+# সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 # ========== ল্যান্ডিং পেজ ==========
@@ -29,7 +29,7 @@ h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
 <body>
     <h1>🚀 SRA CYBERTECH</h1>
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: CutehackX/hitek-data-bucket</p>
+    <p>Dataset: MRSHREY197/Hitekdatabase</p>
     <p>Developer: Team SRA (Salman | Raj | Akash)</p>
     <p style="color:#666;">Try: /search?mobile=9831477801  or  /search?name=rahul</p>
 </body>
@@ -51,7 +51,7 @@ def root():
 def health():
     return {"status": "healthy", "timestamp": time.time()}
 
-# ========== ডিবাগ (pandas ছাড়া) ==========
+# ========== ডিবাগ ==========
 @app.get("/debug/schema")
 def debug_schema():
     try:
@@ -59,20 +59,21 @@ def debug_schema():
         conn = duckdb.connect()
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
-        # শুধু কলামের নাম বের করি
+        conn.execute("SET http_timeout=120;")
         query = f"SELECT * FROM read_parquet('{url}') LIMIT 1"
         cursor = conn.execute(query)
         columns = [desc[0] for desc in cursor.description]
         row = cursor.fetchone()
         conn.close()
         return {
+            "dataset": DATASET_BASE,
             "columns": columns,
             "sample": dict(zip(columns, row)) if row else {}
         }
     except Exception as e:
         return {"error": str(e)}
 
-# ========== মেইন সার্চ (pandas বাদ) ==========
+# ========== মেইন সার্চ ==========
 @app.get("/search")
 def search(
     mobile: Optional[str] = Query(None),
@@ -117,7 +118,7 @@ def search(
         conn.execute("LOAD httpfs;")
         conn.execute("SET memory_limit='256MB';")
         conn.execute("SET threads=2;")
-        conn.execute("SET http_timeout=60;")
+        conn.execute("SET http_timeout=120;")  # ২ মিনিট টাইমআউট
 
         for shard in ALL_SHARDS:
             scanned += 1
