@@ -1,6 +1,5 @@
 import os
 import duckdb
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -11,7 +10,7 @@ app = FastAPI(title="SRA CyberTech Database Search API")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
-# Saari 20 files ki list generate kar rahe hain
+# Saari 20 files ki list (Sequential order: alt_master_shard 0-9, then final_master_shard 0-9)
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 LANDING_PAGE_HTML = """
@@ -63,33 +62,6 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root_landing_page():
     return HTMLResponse(content=LANDING_PAGE_HTML, status_code=200)
 
-def search_single_shard(shard_file: str, where_clause: str, limit: int):
-    """Ek single shard file ko scan karne ke liye execution function"""
-    conn = None
-    try:
-        if HF_TOKEN:
-            parquet_url = f"{DATASET_BASE_URL}/{shard_file}?token={HF_TOKEN}"
-        else:
-            parquet_url = f"{DATASET_BASE_URL}/{shard_file}"
-
-        conn = duckdb.connect()
-        conn.execute("SET memory_limit='150MB';")
-        conn.execute("SET threads=1;")
-
-        query = f"SELECT *, '{shard_file}' AS _source_file FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
-        cursor = conn.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-
-        if rows:
-            return [dict(zip(columns, [str(val) if val is not None else "" for val in row])) for row in rows]
-        return []
-    except Exception:
-        return []
-    finally:
-        if conn:
-            conn.close()
-
 @app.get("/search")
 def search_records(
     mobile: Optional[str] = Query(None, description="Search by Mobile Number"),
@@ -101,7 +73,7 @@ def search_records(
     address: Optional[str] = Query(None, description="Search by Address"),
     limit: int = Query(50, description="Max records to return")
 ):
-    # Dynamic Search Conditions
+    # Search Conditions Prepare Karein
     conditions = []
     if mobile:
         conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
@@ -129,30 +101,55 @@ def search_records(
 
     where_clause = " AND ".join(conditions)
     all_results = []
+    scanned_count = 0
 
-    # Parallel Scan across all 20 files with max 3 workers to prevent memory overload
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(search_single_shard, shard, where_clause, limit) for shard in ALL_SHARDS]
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                all_results.extend(res)
+    # EK-EK KARKE FILE SEARCH LOGIC (Sequential Search)
+    for shard_file in ALL_SHARDS:
+        scanned_count += 1
+        conn = None
+        try:
+            if HF_TOKEN:
+                parquet_url = f"{DATASET_BASE_URL}/{shard_file}?token={HF_TOKEN}"
+            else:
+                parquet_url = f"{DATASET_BASE_URL}/{shard_file}"
+
+            conn = duckdb.connect()
+            conn.execute("SET memory_limit='120MB';")
+            conn.execute("SET threads=1;")
+
+            query = f"SELECT *, '{shard_file}' AS _source_file FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
+            cursor = conn.execute(query)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+
+            if rows:
+                formatted_rows = [dict(zip(columns, [str(val) if val is not None else "" for val in row])) for row in rows]
+                all_results.extend(formatted_rows)
+                
+                # Agar desired limit tak results mil jayein, toh turant stop kar do
                 if len(all_results) >= limit:
                     break
+        except Exception:
+            continue
+        finally:
+            if conn:
+                conn.close()
 
+    # Agar koi record na mile
     if not all_results:
         return JSONResponse(
             status_code=404,
             content={
                 "status": "not_found",
-                "message": "No records found matching your query across all 20 database shards."
+                "message": "No records found matching your query across the database.",
+                "total_shards_checked": scanned_count
             }
         )
 
     return {
         "status": "success",
         "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
-        "total_shards_scanned": 20,
+        "total_shards_checked": scanned_count,
         "count": len(all_results[:limit]),
         "results": all_results[:limit]
     }
