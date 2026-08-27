@@ -171,7 +171,7 @@ def search_records(
         if HF_TOKEN:
             headers["Authorization"] = f"Bearer {HF_TOKEN}"
         
-        # Resolve redirect to get direct download URL
+        # Get CDN redirect URL
         head_resp = requests.head(raw_url, headers=headers, allow_redirects=True)
         final_url = head_resp.url
 
@@ -179,6 +179,9 @@ def search_records(
         conn.execute("SET memory_limit='250MB';")
         conn.execute("SET threads=1;")
         conn.execute("INSTALL httpfs; LOAD httpfs;")
+        
+        # Fix for HTTP URL glob patterns error
+        conn.execute("SET allow_asterisks_in_http_paths = true;")
 
         conditions = []        
         if name:
