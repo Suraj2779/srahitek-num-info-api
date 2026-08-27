@@ -12,7 +12,7 @@ app = FastAPI(title="SRA CyberTech Ultimate Search API")
 # ========== আপনার দেওয়া লিংক ==========
 DATASET_BASE = "https://huggingface.co/buckets/MRSHREY197/Hitekdatabase-bucket/resolve/main"
 
-# সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
+# সব ২০টি ফাইল
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 # ========== ল্যান্ডিং পেজ ==========
@@ -30,9 +30,9 @@ h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
 <body>
     <h1>🚀 SRA CYBERTECH</h1>
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: <span style="color:#00ffcc;">MRSHREY197/Hitekdatabase-bucket</span></p>
-    <p>Developer: Team SRA (Salman | Raj | Akash)</p>
-    <p style="color:#666;">Use: /search?name=rahul</p>
+    <p>Dataset: MRSHREY197/Hitekdatabase-bucket</p>
+    <p>Developer: Team SRA</p>
+    <p style="color:#666;">/search?mobile=9831477801 | /search?name=rahul</p>
 </body>
 </html>
 """
@@ -48,54 +48,37 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root():
     return HTMLResponse(content=LANDING_HTML)
 
-# ========== হেলথ চেক ==========
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "timestamp": time.time(), "dataset": "MRSHREY197/Hitekdatabase-bucket"}
+    return {"status": "healthy", "timestamp": time.time()}
 
-# ========== ডায়াগনস্টিক: কোন কলামগুলো আছে দেখুন ==========
-@app.get("/schema")
-def show_schema():
-    """প্রথম শার্ডের কলামগুলোর নাম ও ডেটা টাইপ দেখায়"""
-    conn = None
+# ========== ডিবাগ এন্ডপয়েন্ট – কলামের নাম দেখাবে ==========
+@app.get("/debug/schema")
+def debug_schema():
+    """প্রথম ফাইল থেকে কলামের নাম ও ডেটার ধরণ দেখায়"""
     try:
         url = f"{DATASET_BASE}/alt_master_shard_0.parquet"
         conn = duckdb.connect()
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
         conn.execute("SET memory_limit='256MB';")
-        conn.execute("SET threads=2;")
-        conn.execute("SET http_timeout=60;")
         
-        query = f"SELECT * FROM read_parquet('{url}') LIMIT 1"
-        df = conn.execute(query).df()
+        # প্রথম 1টি রো দেখি
+        df = conn.execute(f"SELECT * FROM read_parquet('{url}') LIMIT 1").df()
+        conn.close()
         
-        columns_info = []
-        for col in df.columns:
-            columns_info.append({
-                "name": col,
-                "dtype": str(df[col].dtype),
-                "sample_value": str(df[col].iloc[0]) if not df.empty else None
-            })
+        columns_info = {col: str(df[col].dtype) for col in df.columns}
+        sample_data = df.iloc[0].to_dict() if not df.empty else {}
         
         return {
-            "status": "success",
-            "dataset": "MRSHREY197/Hitekdatabase-bucket",
-            "shard": "alt_master_shard_0.parquet",
             "columns": columns_info,
-            "total_columns": len(df.columns),
-            "sample_row": df.iloc[0].to_dict() if not df.empty else None
+            "sample_data": sample_data,
+            "note": "এই কলামের নামগুলো ব্যবহার করে সার্চ করুন। যেমন: ?mobile=9831477801"
         }
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}
 
-# ========== মেইন সার্চ (সব প্যারামিটার সহ) ==========
+# ========== মেইন সার্চ ==========
 @app.get("/search")
 def search_records(
     mobile: Optional[str] = Query(None, description="Mobile Number"),
@@ -105,23 +88,15 @@ def search_records(
     id: Optional[str] = Query(None, description="ID"),
     email: Optional[str] = Query(None, description="Email"),
     address: Optional[str] = Query(None, description="Address"),
-    limit: int = Query(10, ge=1, le=50, description="Max records")
+    limit: int = Query(10, ge=1, le=50)
 ):
     start_time = time.time()
     
-    # ===== প্যারামিটার চেক =====
-    # প্রথমে ডেটাসেটের আসল কলামের নাম বের করা যায়? 
-    # আমরা একটা ফাংশন বানাবো যা কলামের নাম ম্যাপ করবে
-    
-    # ডেটাসেটের কলামের নামগুলো (এই ফাইলগুলোর জন্য)
-    # আমরা আগে থেকেই জেনে রাখি কলামগুলো কী কী
-    # আপনার আউটপুট থেকে দেখা যাচ্ছে: mobile, name, fname, address, alt, circle, id, email
-    
     conditions = []
     
-    # এখন আমরা প্রতিটি প্যারামিটারের জন্য আলাদাভাবে কোয়েরি বানাবো
+    # ===== গুরুত্বপূর্ণ: কলামের নাম আসল ডেটাসেট অনুযায়ী =====
+    # যদি ডেটাসেটে 'mobile' না হয়ে 'Mobile' থাকে, তাহলে এখানে পরিবর্তন করুন
     if mobile:
-        # mobile কলামে search
         conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
     if alt:
         conditions.append(f"CAST(alt AS VARCHAR) LIKE '%{alt}%'")
@@ -146,9 +121,7 @@ def search_records(
     all_results = []
     failed_shards = 0
     scanned_count = 0
-    shard_names = []
 
-    # ===== সব ২০টি ফাইলেই সার্চ =====
     conn = None
     try:
         conn = duckdb.connect()
@@ -163,7 +136,7 @@ def search_records(
             try:
                 url = f"{DATASET_BASE}/{shard_file}"
                 
-                # ফাইল আছে কিনা চেক
+                # HEAD চেক
                 try:
                     head_resp = requests.head(url, timeout=5)
                     if head_resp.status_code != 200:
@@ -173,10 +146,8 @@ def search_records(
                     failed_shards += 1
                     continue
                 
-                # কোয়েরি চালান
                 query = f"""
-                    SELECT 
-                        mobile, name, fname, address, alt, circle, id, email,
+                    SELECT *,
                         '{shard_file}' AS _source 
                     FROM read_parquet('{url}') 
                     WHERE {where_clause} 
@@ -192,7 +163,6 @@ def search_records(
                         for row in rows
                     ]
                     all_results.extend(formatted)
-                    shard_names.append(shard_file)
                     
                     if len(all_results) >= limit:
                         break
@@ -204,11 +174,7 @@ def search_records(
     except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "message": f"Database error: {str(e)}",
-                "Developer": "Team SRA"
-            }
+            content={"status": "error", "message": f"Database error: {str(e)}"}
         )
     finally:
         if conn:
@@ -224,17 +190,16 @@ def search_records(
                 "message": "No records found",
                 "shards_checked": scanned_count,
                 "shards_failed": failed_shards,
-                "time_ms": elapsed_ms
+                "time_ms": elapsed_ms,
+                "tip": "Use /debug/schema to see actual column names"
             }
         )
 
     return {
         "status": "success",
-        "developer": "Team SRA (Salman | Raj | Akash)",
-        "dataset": "MRSHREY197/Hitekdatabase-bucket",
+        "developer": "Team SRA",
         "shards_checked": scanned_count,
         "shards_failed": failed_shards,
-        "shards_with_data": list(set(shard_names)),
         "time_ms": elapsed_ms,
         "count": len(all_results),
         "results": all_results[:limit]
