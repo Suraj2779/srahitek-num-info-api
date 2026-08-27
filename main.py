@@ -1,7 +1,7 @@
 import os
 import duckdb
+import requests
 from fastapi import FastAPI, HTTPException, Query
-from huggingface_hub import login
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -14,10 +14,7 @@ DEVELOPER_NAME = "@SRA_CyberTech_Pvt_Ltd_Owner_bot"
 CHANNEL_URL = "https://t.me/SRACyberTechPvtLtd"
 DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
-# Hugging Face Access Token Setup
 HF_TOKEN = os.getenv("HF_TOKEN")
-if HF_TOKEN:
-    login(token=HF_TOKEN)
 
 # =====================================================================
 # DYNAMIC API KEY SYSTEM
@@ -163,22 +160,25 @@ def search_records(
     address: Optional[str] = Query(None, description="Search by Address"),
     limit: int = Query(50, description="Max records to return")
 ):
-    # Key validation
     key_data, error = validate_api_key(api_key)
     if not key_data:
         raise HTTPException(status_code=403, detail=error)
     
     conn = None
     try:
-        parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
+        raw_url = f"{DATASET_BASE_URL}/{shard_name}"
+        headers = {}
+        if HF_TOKEN:
+            headers["Authorization"] = f"Bearer {HF_TOKEN}"
         
+        # Resolve redirect to get direct download URL
+        head_resp = requests.head(raw_url, headers=headers, allow_redirects=True)
+        final_url = head_resp.url
+
         conn = duckdb.connect()
         conn.execute("SET memory_limit='250MB';")
         conn.execute("SET threads=1;")
         conn.execute("INSTALL httpfs; LOAD httpfs;")
-
-        if HF_TOKEN:
-            conn.execute(f"SET http_headers={{'Authorization': 'Bearer {HF_TOKEN}'}};")
 
         conditions = []        
         if name:
@@ -200,7 +200,7 @@ def search_records(
             raise HTTPException(status_code=400, detail="At least one search parameter must be provided.")
         
         where_clause = " AND ".join(conditions)
-        query = f"SELECT * FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
+        query = f"SELECT * FROM read_parquet('{final_url}') WHERE {where_clause} LIMIT {limit}"
         
         df = conn.execute(query).df()
         df = df.fillna("")
