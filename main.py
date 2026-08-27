@@ -168,11 +168,16 @@ def search_records(
     if not key_data:
         raise HTTPException(status_code=403, detail=error)
     
-    # Query building for Hugging Face Parquet dataset via DuckDB
+    conn = None
     try:
         parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
-        conn = duckdb.connect()
         
+        # Connect & limit memory to prevent 502 crash on Render
+        conn = duckdb.connect()
+        conn.execute("SET memory_limit='350MB';")
+        conn.execute("SET threads=1;")
+        conn.execute("INSTALL httpfs; LOAD httpfs;")
+
         conditions = []        
         if name:
             conditions.append(f"LOWER(name) LIKE LOWER('%{name}%')")
@@ -190,7 +195,7 @@ def search_records(
             conditions.append(f"LOWER(address) LIKE LOWER('%{address}%')")
             
         if not conditions:
-            raise HTTPException(status_code=400, detail="At least one search filter (name, fname, mobile, address, etc.) must be provided.")
+            raise HTTPException(status_code=400, detail="At least one search parameter must be provided.")
         
         where_clause = " AND ".join(conditions)
         query = f"SELECT * FROM '{parquet_url}' WHERE {where_clause} LIMIT {limit}"
@@ -198,7 +203,7 @@ def search_records(
         df = conn.execute(query).df()
         df = df.fillna("")
         
-        # Deduct usage count on success
+        # Increment daily usage count
         key_data["used_today"] += 1
         
         return {
@@ -210,5 +215,10 @@ def search_records(
             "results": df.to_dict(orient="records")
         }
         
+    except HTTPException as http_ex:
+        raise http_ex
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Database Search Error: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
