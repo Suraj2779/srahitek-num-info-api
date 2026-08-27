@@ -6,7 +6,6 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
-from functools import lru_cache
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
@@ -54,7 +53,7 @@ def root():
 def health_check():
     return {"status": "healthy", "timestamp": time.time(), "dataset": "MRSHREY197/Hitekdatabase-bucket"}
 
-# ========== মেইন সার্চ (সব ২০টি ফাইলেই সার্চ) ==========
+# ========== মেইন সার্চ ==========
 @app.get("/search")
 def search_records(
     mobile: Optional[str] = Query(None, description="Mobile Number"),
@@ -143,7 +142,6 @@ def search_records(
                     all_results.extend(formatted)
                     shard_names.append(shard_file)
                     
-                    # লিমিট পূর্ণ হলে থামুন
                     if len(all_results) >= limit:
                         break
                         
