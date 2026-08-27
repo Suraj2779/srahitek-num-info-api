@@ -8,7 +8,7 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
-# ======== শুধু এই ডেটাসেট ========
+# ======== শুধু এই ডেটাসেট (যেটা কাজ করছে) ========
 DATASET_BASE = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
 # সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
@@ -31,7 +31,7 @@ h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
     <p>Dataset: MRSHREY197/Hitekdatabase</p>
     <p>Developer: Team SRA (Salman | Raj | Akash)</p>
-    <p style="color:#666;">Try: /search?mobile=9831477801  or  /search?name=rahul</p>
+    <p style="color:#666;">Try: /search?mobile=9831477801 | /search?name=rahul | /search?id=835513945495</p>
 </body>
 </html>
 """
@@ -73,21 +73,22 @@ def debug_schema():
     except Exception as e:
         return {"error": str(e)}
 
-# ========== মেইন সার্চ ==========
+# ========== মেইন সার্চ (সব প্যারামিটার সহ) ==========
 @app.get("/search")
 def search(
-    mobile: Optional[str] = Query(None),
-    alt: Optional[str] = Query(None),
-    name: Optional[str] = Query(None),
-    fname: Optional[str] = Query(None),
-    id: Optional[str] = Query(None),
-    email: Optional[str] = Query(None),
-    address: Optional[str] = Query(None),
-    limit: int = Query(10, ge=1, le=50)
+    mobile: Optional[str] = Query(None, description="Search by Mobile Number"),
+    alt: Optional[str] = Query(None, description="Search by Alternate Number"),
+    name: Optional[str] = Query(None, description="Search by Name"),
+    fname: Optional[str] = Query(None, description="Search by Father Name"),
+    id: Optional[str] = Query(None, description="Search by ID"),
+    email: Optional[str] = Query(None, description="Search by Email"),
+    address: Optional[str] = Query(None, description="Search by Address"),
+    limit: int = Query(10, ge=1, le=50, description="Max records to return")
 ):
     start = time.time()
     conditions = []
 
+    # সব প্যারামিটার চেক
     if mobile:
         conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
     if alt:
@@ -103,8 +104,15 @@ def search(
     if address:
         conditions.append(f"LOWER(address) LIKE LOWER('%{address}%')")
 
+    # কোনো প্যারামিটার না দিলে এরর
     if not conditions:
-        return JSONResponse(status_code=400, content={"status": "error", "message": "Give at least one parameter"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "Give at least one parameter: mobile, alt, name, fname, id, email, address"
+            }
+        )
 
     where = " AND ".join(conditions)
     all_results = []
@@ -118,7 +126,7 @@ def search(
         conn.execute("LOAD httpfs;")
         conn.execute("SET memory_limit='256MB';")
         conn.execute("SET threads=2;")
-        conn.execute("SET http_timeout=120;")  # ২ মিনিট টাইমআউট
+        conn.execute("SET http_timeout=120;")
 
         for shard in ALL_SHARDS:
             scanned += 1
@@ -147,7 +155,10 @@ def search(
                 failed += 1
                 continue
     except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Database error: {str(e)}"}
+        )
     finally:
         if conn:
             conn.close()
@@ -168,7 +179,7 @@ def search(
 
     return {
         "status": "success",
-        "developer": "Team SRA",
+        "developer": "Team SRA (Salman | Raj | Akash)",
         "shards_checked": scanned,
         "shards_failed": failed,
         "time_ms": elapsed,
