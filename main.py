@@ -53,7 +53,49 @@ def root():
 def health_check():
     return {"status": "healthy", "timestamp": time.time(), "dataset": "MRSHREY197/Hitekdatabase-bucket"}
 
-# ========== মেইন সার্চ ==========
+# ========== ডায়াগনস্টিক: কোন কলামগুলো আছে দেখুন ==========
+@app.get("/schema")
+def show_schema():
+    """প্রথম শার্ডের কলামগুলোর নাম ও ডেটা টাইপ দেখায়"""
+    conn = None
+    try:
+        url = f"{DATASET_BASE}/alt_master_shard_0.parquet"
+        conn = duckdb.connect()
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        conn.execute("SET memory_limit='256MB';")
+        conn.execute("SET threads=2;")
+        conn.execute("SET http_timeout=60;")
+        
+        query = f"SELECT * FROM read_parquet('{url}') LIMIT 1"
+        df = conn.execute(query).df()
+        
+        columns_info = []
+        for col in df.columns:
+            columns_info.append({
+                "name": col,
+                "dtype": str(df[col].dtype),
+                "sample_value": str(df[col].iloc[0]) if not df.empty else None
+            })
+        
+        return {
+            "status": "success",
+            "dataset": "MRSHREY197/Hitekdatabase-bucket",
+            "shard": "alt_master_shard_0.parquet",
+            "columns": columns_info,
+            "total_columns": len(df.columns),
+            "sample_row": df.iloc[0].to_dict() if not df.empty else None
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
+    finally:
+        if conn:
+            conn.close()
+
+# ========== মেইন সার্চ (সব প্যারামিটার সহ) ==========
 @app.get("/search")
 def search_records(
     mobile: Optional[str] = Query(None, description="Mobile Number"),
@@ -68,8 +110,18 @@ def search_records(
     start_time = time.time()
     
     # ===== প্যারামিটার চেক =====
+    # প্রথমে ডেটাসেটের আসল কলামের নাম বের করা যায়? 
+    # আমরা একটা ফাংশন বানাবো যা কলামের নাম ম্যাপ করবে
+    
+    # ডেটাসেটের কলামের নামগুলো (এই ফাইলগুলোর জন্য)
+    # আমরা আগে থেকেই জেনে রাখি কলামগুলো কী কী
+    # আপনার আউটপুট থেকে দেখা যাচ্ছে: mobile, name, fname, address, alt, circle, id, email
+    
     conditions = []
+    
+    # এখন আমরা প্রতিটি প্যারামিটারের জন্য আলাদাভাবে কোয়েরি বানাবো
     if mobile:
+        # mobile কলামে search
         conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
     if alt:
         conditions.append(f"CAST(alt AS VARCHAR) LIKE '%{alt}%'")
@@ -111,7 +163,7 @@ def search_records(
             try:
                 url = f"{DATASET_BASE}/{shard_file}"
                 
-                # ফাইল আছে কিনা চেক (HEAD রিকোয়েস্ট)
+                # ফাইল আছে কিনা চেক
                 try:
                     head_resp = requests.head(url, timeout=5)
                     if head_resp.status_code != 200:
