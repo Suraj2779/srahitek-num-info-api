@@ -1,5 +1,6 @@
 import os
 import duckdb
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -9,6 +10,9 @@ app = FastAPI(title="SRA CyberTech Database Search API")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 DATASET_BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
+
+# Saari 20 files ki list generate kar rahe hain
+ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
 
 LANDING_PAGE_HTML = """
 <!DOCTYPE html>
@@ -59,10 +63,35 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root_landing_page():
     return HTMLResponse(content=LANDING_PAGE_HTML, status_code=200)
 
+def search_single_shard(shard_file: str, where_clause: str, limit: int):
+    """Ek single shard file ko scan karne ke liye execution function"""
+    conn = None
+    try:
+        if HF_TOKEN:
+            parquet_url = f"{DATASET_BASE_URL}/{shard_file}?token={HF_TOKEN}"
+        else:
+            parquet_url = f"{DATASET_BASE_URL}/{shard_file}"
+
+        conn = duckdb.connect()
+        conn.execute("SET memory_limit='150MB';")
+        conn.execute("SET threads=1;")
+
+        query = f"SELECT *, '{shard_file}' AS _source_file FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
+        cursor = conn.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        if rows:
+            return [dict(zip(columns, [str(val) if val is not None else "" for val in row])) for row in rows]
+        return []
+    except Exception:
+        return []
+    finally:
+        if conn:
+            conn.close()
+
 @app.get("/search")
 def search_records(
-    shard_name: str = Query(..., description="Parquet file name (e.g., alt_master_shard_0.parquet)"),
-    api_key: Optional[str] = Query(None, description="API Key"),
     mobile: Optional[str] = Query(None, description="Search by Mobile Number"),
     alt: Optional[str] = Query(None, description="Search by Alternate Number"),
     name: Optional[str] = Query(None, description="Search by Name"),
@@ -72,77 +101,58 @@ def search_records(
     address: Optional[str] = Query(None, description="Search by Address"),
     limit: int = Query(50, description="Max records to return")
 ):
-    conn = None
-    try:
-        # Construct Parquet URL with Token if required
-        if HF_TOKEN:
-            parquet_url = f"{DATASET_BASE_URL}/{shard_name}?token={HF_TOKEN}"
-        else:
-            parquet_url = f"{DATASET_BASE_URL}/{shard_name}"
+    # Dynamic Search Conditions
+    conditions = []
+    if mobile:
+        conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
+    if alt:
+        conditions.append(f"CAST(alt AS VARCHAR) LIKE '%{alt}%'")
+    if name:
+        conditions.append(f"LOWER(name) LIKE LOWER('%{name}%')")
+    if fname:
+        conditions.append(f"LOWER(fname) LIKE LOWER('%{fname}%')")
+    if id:
+        conditions.append(f"CAST(id AS VARCHAR) LIKE '%{id}%'")
+    if email:
+        conditions.append(f"LOWER(email) LIKE LOWER('%{email}%')")
+    if address:
+        conditions.append(f"LOWER(address) LIKE LOWER('%{address}%')")
         
-        conn = duckdb.connect()
-        # Strict memory limit to prevent Render 502/OOM crashes
-        conn.execute("SET memory_limit='200MB';")
-        conn.execute("SET threads=1;")
-
-        conditions = []
-        if mobile:
-            conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
-        if alt:
-            conditions.append(f"CAST(alt AS VARCHAR) LIKE '%{alt}%'")
-        if name:
-            conditions.append(f"LOWER(name) LIKE LOWER('%{name}%')")
-        if fname:
-            conditions.append(f"LOWER(fname) LIKE LOWER('%{fname}%')")
-        if id:
-            conditions.append(f"CAST(id AS VARCHAR) LIKE '%{id}%'")
-        if email:
-            conditions.append(f"LOWER(email) LIKE LOWER('%{email}%')")
-        if address:
-            conditions.append(f"LOWER(address) LIKE LOWER('%{address}%')")
-            
-        if not conditions:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "message": "At least one search parameter is required."
-                }
-            )
-        
-        where_clause = " AND ".join(conditions)
-        query = f"SELECT * FROM read_parquet('{parquet_url}') WHERE {where_clause} LIMIT {limit}"
-        
-        cursor = conn.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-        
-        if not rows:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "status": "not_found",
-                    "message": "No records found matching your query."
-                }
-            )
-            
-        results = [dict(zip(columns, [str(val) if val is not None else "" for val in row])) for row in rows]
-            
-        return {
-            "status": "success",
-            "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
-            "count": len(results),
-            "results": results
-        }
-        
-    except Exception as e:
+    if not conditions:
         return JSONResponse(
-            status_code=500,
+            status_code=400,
             content={
                 "status": "error",
-                "message": f"Database processing error: {str(e)}"
+                "message": "Kam se kam ek search parameter (mobile, alt, name, fname, id, email, address) dena zaroori hai."
             }
         )
-    finally:
-        if conn:
-            conn.close()
+
+    where_clause = " AND ".join(conditions)
+    all_results = []
+
+    # Parallel Scan across all 20 files with max 3 workers to prevent memory overload
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(search_single_shard, shard, where_clause, limit) for shard in ALL_SHARDS]
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                all_results.extend(res)
+                if len(all_results) >= limit:
+                    break
+
+    if not all_results:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "not_found",
+                "message": "No records found matching your query across all 20 database shards."
+            }
+        )
+
+    return {
+        "status": "success",
+        "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
+        "total_shards_scanned": 20,
+        "count": len(all_results[:limit]),
+        "results": all_results[:limit]
+    }
