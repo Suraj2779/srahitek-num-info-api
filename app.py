@@ -1,6 +1,5 @@
 import os
 import time
-import requests
 import duckdb
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -9,8 +8,8 @@ from typing import Optional
 
 app = FastAPI(title="SRA CyberTech Ultimate Search API")
 
-# ======== শুধু MRSHREY197 ডেটাসেট ========
-DATASET_BASE = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
+# ======== ডেটাসেট (CutehackX – আগে কাজ করছিল) ========
+DATASET_BASE = "https://huggingface.co/datasets/CutehackX/hitek-data-bucket/resolve/main"
 
 # সব ২০টি ফাইল
 ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
@@ -30,7 +29,7 @@ h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
 <body>
     <h1>🚀 SRA CYBERTECH</h1>
     <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: MRSHREY197/Hitekdatabase</p>
+    <p>Dataset: CutehackX/hitek-data-bucket</p>
     <p>Developer: Team SRA (Salman | Raj | Akash)</p>
     <p style="color:#666;">Try: /search?mobile=9831477801  or  /search?name=rahul</p>
 </body>
@@ -52,7 +51,7 @@ def root():
 def health():
     return {"status": "healthy", "timestamp": time.time()}
 
-# ========== ডিবাগ ==========
+# ========== ডিবাগ (pandas ছাড়া) ==========
 @app.get("/debug/schema")
 def debug_schema():
     try:
@@ -60,16 +59,20 @@ def debug_schema():
         conn = duckdb.connect()
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
-        df = conn.execute(f"SELECT * FROM read_parquet('{url}') LIMIT 1").df()
+        # শুধু কলামের নাম বের করি
+        query = f"SELECT * FROM read_parquet('{url}') LIMIT 1"
+        cursor = conn.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        row = cursor.fetchone()
         conn.close()
         return {
-            "columns": list(df.columns),
-            "sample": df.iloc[0].to_dict() if not df.empty else {}
+            "columns": columns,
+            "sample": dict(zip(columns, row)) if row else {}
         }
     except Exception as e:
         return {"error": str(e)}
 
-# ========== মেইন সার্চ ==========
+# ========== মেইন সার্চ (pandas বাদ) ==========
 @app.get("/search")
 def search(
     mobile: Optional[str] = Query(None),
@@ -120,12 +123,6 @@ def search(
             scanned += 1
             try:
                 url = f"{DATASET_BASE}/{shard}"
-                # HEAD চেক
-                resp = requests.head(url, timeout=5)
-                if resp.status_code != 200:
-                    failed += 1
-                    continue
-
                 q = f"""
                     SELECT *,
                         '{shard}' AS _source
@@ -145,7 +142,7 @@ def search(
                     all_results.extend(formatted)
                     if len(all_results) >= limit:
                         break
-            except:
+            except Exception as e:
                 failed += 1
                 continue
     except Exception as e:
