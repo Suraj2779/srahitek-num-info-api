@@ -1,52 +1,49 @@
-import os
-import io
-import time
-import math
-import requests
-import pandas as pd
-import pyarrow.parquet as pq
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Query, Request, Depends, HTTPException, status, Cookie, Form, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.security import APIKeyHeader, APIKeyQuery
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from pymongo import MongoClient
+import duckdb
+import os
+import secrets
+import hashlib
+import math
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-app = FastAPI()
+# Load Environment Variables
+load_dotenv()
+MONGO_URI = os.getenv("MONGODB_URI")
+ADMIN_USER = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 
-# ========== কনফিগারেশন ==========
-REPO_NAME = "MRSHREY197/Hitekdatabase"
-BASE_URL = f"https://huggingface.co/datasets/{REPO_NAME}/resolve/main"
-TIMEOUT = 120
-MAX_RETRIES = 2
-SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email', 'id']
+# Security Token Hash
+ADMIN_HASH = hashlib.sha256(f"{ADMIN_USER}:{ADMIN_PASS}".encode()).hexdigest()
 
-# ========== Hugging Face API থেকে ফাইল লিস্ট ফেচ ==========
-def fetch_parquet_files():
-    api_url = f"https://huggingface.co/api/datasets/{REPO_NAME}"
-    try:
-        resp = requests.get(api_url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        siblings = data.get('siblings', [])
-        files = [item['rfilename'] for item in siblings if item['rfilename'].endswith('.parquet')]
-        if files:
-            print(f"✅ পাওয়া গেছে {len(files)} টি Parquet ফাইল")
-            return files
-        else:
-            print("⚠️ কোনো Parquet ফাইল পাওয়া যায়নি")
-            return []
-    except Exception as e:
-        print(f"⚠️ ফাইল লিস্ট ফেচ করতে ব্যর্থ: {e}")
-        fallback = []
-        for i in range(10):
-            fallback.append(f"alt_master_shard_{i}.parquet")
-            fallback.append(f"final_master_shard_{i}.parquet")
-        print(f"⚠️ ফ্যালব্যাক ব্যবহার করা হচ্ছে: {len(fallback)} টি ফাইল")
-        return fallback
+# Set Your Hidden Admin Path
+SECRET_ADMIN_PATH = "/nxd-secret-panel"
 
-FILE_NAMES = fetch_parquet_files()
-print(f"📁 মোট ফাইল: {len(FILE_NAMES)}")
-print(f"📄 ফাইলসমূহ: {FILE_NAMES}")
+# Initialize MongoDB
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = mongo_client["hitek_gateway"]
+    keys_collection = db["api_keys"]
+    logs_collection = db["api_logs"]
+    print("✅ MongoDB Connected Successfully!")
+except Exception as e:
+    print(f"❌ MongoDB Connection Error: {e}")
 
-# ========== হেল্পার ফাংশন ==========
+# Initialize FastAPI & DuckDB
+app = FastAPI(docs_url=None, redoc_url=None) 
+con = duckdb.connect()
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
+
+# Security Dependencies
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
+
+# Helper function to clean NaN values for JSON compliance
 def clean_nan(obj):
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
@@ -56,163 +53,280 @@ def clean_nan(obj):
         return [clean_nan(v) for v in obj]
     return obj
 
-def fetch_parquet_safe(file_name):
-    url = f"{BASE_URL}/{file_name}"
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            response = requests.get(url, timeout=TIMEOUT)
-            response.raise_for_status()
-            table = pq.read_table(io.BytesIO(response.content))
-            df = table.to_pandas()
-            df = df.fillna("")
-            return df
-        except Exception:
-            if attempt == MAX_RETRIES:
-                return None
-            time.sleep(2)
-    return None
+# Cookie Based Admin Auth
+def verify_admin(admin_auth: str = Cookie(None)):
+    if not admin_auth or admin_auth != ADMIN_HASH:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
 
-def search_in_all_files(query):
-    if not query or len(query) < 2:
-        return [], 0, 0
+# API Key Validation
+def verify_api_key(request: Request, key_header: str = Depends(api_key_header), key_query: str = Depends(api_key_query)):
+    api_key = key_header or key_query
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API is missing")
     
-    all_results = []
-    success = 0
-    failed = 0
+    key_data = keys_collection.find_one({"api_key": api_key})
+    if not key_data:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
     
-    for file_name in FILE_NAMES:
-        df = fetch_parquet_safe(file_name)
-        if df is None:
-            failed += 1
-            continue
-        success += 1
+    if not key_data.get("is_active"):
+        raise HTTPException(status_code=401, detail="API Key has been revoked")
         
-        mask = pd.Series([False] * len(df))
-        for col in SEARCH_COLUMNS:
-            if col in df.columns:
-                mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
-        
-        filtered_df = df[mask]
-        if not filtered_df.empty:
-            records = filtered_df.to_dict(orient='records')
-            for rec in records:
-                rec['_source_file'] = file_name
-            all_results.extend(records)
+    if datetime.utcnow() > key_data.get("expires_at"):
+        keys_collection.update_one({"api_key": api_key}, {"$set": {"is_active": False}})
+        raise HTTPException(status_code=401, detail="API Key has expired")
     
-    return all_results, success, failed
+    # Track Usage & Logs
+    keys_collection.update_one({"api_key": api_key}, {"$inc": {"usage_count": 1}})
+    logs_collection.insert_one({
+        "client_name": key_data["client_name"],
+        "api_key": api_key,
+        "endpoint": request.url.path,
+        "ip_address": request.client.host,
+        "timestamp": datetime.utcnow()
+    })
+    
+    return api_key
 
-def search_number_in_all_files(number):
-    all_results = []
-    success = 0
-    failed = 0
-    
-    for file_name in FILE_NAMES:
-        df = fetch_parquet_safe(file_name)
-        if df is None:
-            failed += 1
-            continue
-        success += 1
-        
-        mask = pd.Series([False] * len(df))
-        if 'mobile' in df.columns:
-            mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
-        if 'alt' in df.columns:
-            mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
-        
-        filtered_df = df[mask]
-        if not filtered_df.empty:
-            records = filtered_df.to_dict(orient='records')
-            for rec in records:
-                rec['_source_file'] = file_name
-            all_results.extend(records)
-    
-    return all_results, success, failed
-
-# ========== এন্ডপয়েন্ট ==========
-@app.get("/")
-def home():
-    return {
-        "status": "SRA CyberTech API is LIVE 🚀",
-        "developer": "Team SRA (Salman | Raj | Akash)",
-        "files_found": len(FILE_NAMES),
-        "files_list": FILE_NAMES,
-        "endpoints": {
-            "/search?q=...": "Search in all fields (mobile, name, fname, address, alt, circle, email, id)",
-            "/FetchData?Number=...": "Search by mobile or alt number"
-        }
-    }
-
-@app.get("/search")
-def search_all_fields(q: str = Query(..., min_length=2, description="Search term")):
-    start = time.time()
-    results, success, failed = search_in_all_files(q)
-    elapsed = (time.time() - start) * 1000
-    
-    if not results:
+# ----------------- EXCEPTION HANDLERS -----------------
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code in [401, 403]:
         return JSONResponse(
-            status_code=404,
+            status_code=exc.status_code, 
             content={
-                "status": "not_found",
-                "query": q,
-                "files_successful": success,
-                "files_failed": failed,
-                "total_files": len(FILE_NAMES),
-                "time_ms": round(elapsed, 2),
-                "Developer": "Team SRA (Salman | Raj | Akash)"
+                "status": "error",
+                "message": "API Key is missing or invalid.",
+                "Developer": "Team SRA (Salman | Raj | Akash)",
+                "Buy_API": "Contact: https://t.me/Aswatthama_0x"
             }
         )
-    
+    return JSONResponse(
+        status_code=exc.status_code, 
+        content={"status": "rejected", "message": exc.detail, "Developer": "Team SRA"}
+    )
+
+# ----------------- PUBLIC ROUTES -----------------
+@app.get("/", response_class=JSONResponse)
+def root_landing_page():
     return {
-        "status": "success",
-        "query": q,
-        "count": len(results),
-        "files_successful": success,
-        "files_failed": failed,
-        "total_files": len(FILE_NAMES),
-        "time_ms": round(elapsed, 2),
-        "results": clean_nan(results),
-        "Developer": "Team SRA (Salman | Raj | Akash)"
+        "status": "Api is running",
+        "message": "SRA Phone Info API is running",
+        "Developer": "Team SRA (Salman | Raj | Akash)",
+        "Buy_API": "Contact: https://t.me/Aswatthama_0x"
     }
 
 @app.get("/FetchData")
-def fetch_by_number(Number: str = Query(..., min_length=10, max_length=15, description="Mobile number")):
-    start = time.time()
-    results, success, failed = search_number_in_all_files(Number)
-    elapsed = (time.time() - start) * 1000
+def fetch_data(Number: str = Query(None), api_key: str = Depends(verify_api_key)):
+    if not Number or not Number.isdigit() or len(Number) < 10 or len(Number) > 15:
+        return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid parameter.", "Developer": "Team SRA"})
     
-    if not results:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "phone": Number,
-                "files_successful": success,
-                "files_failed": failed,
-                "total_files": len(FILE_NAMES),
-                "time_ms": round(elapsed, 2),
-                "Developer": "Team SRA (Salman | Raj | Akash)"
-            }
-        )
+    last_digit = Number[-1]
     
-    return {
-        "status": "success",
-        "phone": Number,
-        "count": len(results),
-        "files_successful": success,
-        "files_failed": failed,
-        "total_files": len(FILE_NAMES),
-        "time_ms": round(elapsed, 2),
-        "results": clean_nan(results),
-        "Developer": "Team SRA (Salman | Raj | Akash)"
-    }
-
-@app.exception_handler(StarletteHTTPException)
-async def custom_404(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "status": "rejected",
-            "message": "Invalid endpoint. Use /search?q=... or /FetchData?Number=...",
+    # ================== আপনার ডেটাসেটের URL ==================
+    base = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
+    primary_url = f"{base}/final_master_shard_{last_digit}.parquet"
+    alt_url = f"{base}/alt_master_shard_{last_digit}.parquet"
+    
+    try:
+        query = f"""
+            SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'
+            UNION ALL
+            SELECT *, 'Alt' AS _record_type FROM read_parquet('{alt_url}') WHERE alt = '{Number}'
+        """
+        raw_results = con.execute(query).df().to_dict(orient="records")
+        
+        cleaned_results = clean_nan(raw_results)
+        
+        main_records = [row for row in cleaned_results if row.pop('_record_type') == 'Main']
+        alt_records = [row for row in cleaned_results if row.pop('_record_type', None) == 'Alt']
+        
+        if not main_records and not alt_records:
+            return JSONResponse(status_code=404, content={"status": "not_found", "phone": Number, "Developer": "Team SRA"})
+            
+        return {
+            "status": "success", 
+            "Total_Main_Results": len(main_records),
+            "Total_Alt_Results": len(alt_records),
+            "Data": {
+                "Main_Records": main_records,
+                "Alt_Records": alt_records
+            },
             "Developer": "Team SRA (Salman | Raj | Akash)"
         }
-    )
+    
+    except Exception as e:
+        print(f"DUCKDB CRASH LOG: {str(e)}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"Data process error: {str(e)}", "Developer": "Team SRA"})
+
+# ----------------- SECURE FORM LOGIN SYSTEM -----------------
+LOGIN_HTML = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><title>SRA Security Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 h-screen flex items-center justify-center">
+    <div class="bg-gray-800 p-8 rounded-lg shadow-xl border border-teal-500 w-96">
+        <h2 class="text-2xl font-bold text-teal-400 mb-6 text-center">SRA Admin Access</h2>
+        <form action="{SECRET_ADMIN_PATH}/login" method="POST" class="flex flex-col gap-4">
+            <input type="text" name="username" placeholder="Username" class="p-3 bg-gray-900 text-white rounded border border-gray-600 focus:border-teal-400 focus:outline-none" required>
+            <input type="password" name="password" placeholder="Password" class="p-3 bg-gray-900 text-white rounded border border-gray-600 focus:border-teal-400 focus:outline-none" required>
+            <button type="submit" class="bg-teal-500 hover:bg-teal-400 text-gray-900 font-bold py-3 rounded mt-2">Login to Dashboard</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+@app.get(SECRET_ADMIN_PATH, response_class=HTMLResponse)
+def admin_dashboard(request: Request, admin_auth: str = Cookie(None)):
+    if not admin_auth or admin_auth != ADMIN_HASH:
+        return HTMLResponse(content=LOGIN_HTML)
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>SRA Admin Console</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-gray-900 text-white p-8 font-sans">
+        <div class="max-w-7xl mx-auto">
+            <div class="flex justify-between items-center border-b border-teal-500 pb-4 mb-8">
+                <h1 class="text-3xl font-bold text-teal-400">SRA Security Dashboard</h1>
+                <div class="flex gap-4 items-center">
+                    <span class="bg-teal-900 text-teal-300 px-3 py-1 rounded-full text-sm">Dev: Team SRA</span>
+                    <a href="{SECRET_ADMIN_PATH}/logout" class="bg-red-600 hover:bg-red-500 px-4 py-2 rounded font-bold text-sm transition-colors">Logout</a>
+                </div>
+            </div>
+            
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-teal-300">Issue API Key</h2>
+                <div class="flex flex-wrap gap-4 items-center">
+                    <input type="text" id="clientName" placeholder="Client Name*" class="p-3 bg-gray-900 border border-gray-600 rounded w-1/4 text-white focus:outline-none focus:border-teal-400">
+                    <input type="text" id="customKey" placeholder="Custom API (Optional)" class="p-3 bg-gray-900 border border-gray-600 rounded w-1/4 text-white focus:outline-none focus:border-teal-400">
+                    <select id="daysValid" class="p-3 bg-gray-900 border border-gray-600 rounded text-white w-32 focus:outline-none focus:border-teal-400">
+                        <option value="7">7 Days</option><option value="30" selected>30 Days</option><option value="365">1 Year</option>
+                    </select>
+                    <button onclick="createKey()" class="bg-teal-500 hover:bg-teal-400 text-gray-900 px-6 py-3 rounded font-bold transition-colors">Generate Key</button>
+                </div>
+                <p id="newKeyDisplay" class="mt-4 text-green-400 font-mono font-bold"></p>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg border border-gray-700">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left table-auto">
+                        <thead>
+                            <tr class="text-gray-400 border-b border-gray-600 text-sm uppercase">
+                                <th class="pb-3">Client</th><th class="pb-3">API Key</th><th class="pb-3">Usage</th>
+                                <th class="pb-3">Expires At</th><th class="pb-3">Status</th><th class="pb-3 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="keysTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+            const adminPath = "{SECRET_ADMIN_PATH}";
+            
+            async function fetchKeys() {{
+                const res = await fetch(adminPath + '/api/keys');
+                if(res.status === 401) window.location.reload();
+                const data = await res.json();
+                
+                let html = '';
+                data.keys.forEach(k => {{
+                    const statusClass = k.is_active ? 'text-green-400' : 'text-yellow-400';
+                    const statusText = k.is_active ? 'Active' : 'Disabled';
+                    html += `
+                    <tr class="border-b border-gray-700 hover:bg-gray-700 transition-colors">
+                        <td class="py-4 font-semibold">${{k.client_name}}</td>
+                        <td class="font-mono text-teal-200">${{k.api_key}}</td>
+                        <td class="font-bold text-purple-400">${{k.usage_count || 0}} Hits</td>
+                        <td class="text-gray-300">${{new Date(k.expires_at).toLocaleDateString()}}</td>
+                        <td class="${{statusClass}} font-bold">${{statusText}}</td>
+                        <td class="text-right space-x-2">
+                            <button onclick="toggleKey('${{k.api_key}}')" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-xs text-white">Toggle</button>
+                            <button onclick="extendKey('${{k.api_key}}')" class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs text-white">+30 Days</button>
+                            <button onclick="deleteKey('${{k.api_key}}')" class="bg-red-600 hover:bg-red-500 px-3 py-1 rounded text-xs text-white">Delete</button>
+                        </td>
+                    </tr>`;
+                }});
+                document.getElementById('keysTable').innerHTML = html;
+            }}
+            
+            async function createKey() {{
+                const client = document.getElementById('clientName').value;
+                const custom = document.getElementById('customKey').value;
+                const days = document.getElementById('daysValid').value;
+                if(!client) return alert('Enter Client Name');
+                
+                const res = await fetch(`${{adminPath}}/api/keys?client_name=${{client}}&days=${{days}}&custom_key=${{custom}}`, {{method: 'POST'}});
+                const data = await res.json();
+                document.getElementById('newKeyDisplay').innerText = `SUCCESS! Key: ${{data.api_key}}`;
+                fetchKeys();
+            }}
+            
+            async function toggleKey(key) {{ await fetch(`${{adminPath}}/api/keys/toggle?api_key=${{key}}`, {{method: 'POST'}}); fetchKeys(); }}
+            async function extendKey(key) {{ if(confirm('Extend 30 days?')) {{ await fetch(`${{adminPath}}/api/keys/extend?api_key=${{key}}&days=30`, {{method: 'POST'}}); fetchKeys(); }} }}
+            async function deleteKey(key) {{ if(confirm('Delete permanently?')) {{ await fetch(`${{adminPath}}/api/keys/delete?api_key=${{key}}`, {{method: 'DELETE'}}); fetchKeys(); }} }}
+            
+            fetchKeys();
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post(SECRET_ADMIN_PATH + "/login")
+def login(username: str = Form(...), password: str = Form(...)):
+    if username == ADMIN_USER and password == ADMIN_PASS:
+        response = RedirectResponse(url=SECRET_ADMIN_PATH, status_code=303)
+        response.set_cookie(key="admin_auth", value=ADMIN_HASH, httponly=True, max_age=86400)
+        return response
+    
+    return HTMLResponse(content="<script>alert('Invalid Credentials!'); window.location.href='" + SECRET_ADMIN_PATH + "';</script>")
+
+@app.get(SECRET_ADMIN_PATH + "/logout")
+def logout():
+    response = RedirectResponse(url=SECRET_ADMIN_PATH, status_code=303)
+    response.delete_cookie("admin_auth")
+    return response
+
+# ----------------- ADMIN API MANAGEMENT LOGIC -----------------
+@app.post(f"{SECRET_ADMIN_PATH}/api/keys")
+def create_api_key(client_name: str, days: int = 30, custom_key: str = None, is_admin: bool = Depends(verify_admin)):
+    new_key = custom_key.strip() if custom_key else "SRA_" + secrets.token_hex(4)
+    if keys_collection.find_one({"api_key": new_key}): raise HTTPException(status_code=400, detail="Custom Key already exists!")
+    keys_collection.insert_one({"client_name": client_name, "api_key": new_key, "created_at": datetime.utcnow(), "expires_at": datetime.utcnow() + timedelta(days=days), "is_active": True, "usage_count": 0})
+    return {"status": "success", "api_key": new_key}
+
+@app.get(f"{SECRET_ADMIN_PATH}/api/keys")
+def list_api_keys(is_admin: bool = Depends(verify_admin)):
+    keys = list(keys_collection.find({}, {"_id": 0}).sort("created_at", -1))
+    return {"keys": keys}
+
+@app.post(f"{SECRET_ADMIN_PATH}/api/keys/toggle")
+def toggle_api_key(api_key: str, is_admin: bool = Depends(verify_admin)):
+    key_data = keys_collection.find_one({"api_key": api_key})
+    if key_data: keys_collection.update_one({"api_key": api_key}, {"$set": {"is_active": not key_data["is_active"]}})
+    return {"status": "success"}
+
+@app.post(f"{SECRET_ADMIN_PATH}/api/keys/extend")
+def extend_api_key(api_key: str, days: int = 30, is_admin: bool = Depends(verify_admin)):
+    key_data = keys_collection.find_one({"api_key": api_key})
+    if key_data: keys_collection.update_one({"api_key": api_key}, {"$set": {"expires_at": key_data["expires_at"] + timedelta(days=days)}})
+    return {"status": "success"}
+
+@app.delete(f"{SECRET_ADMIN_PATH}/api/keys/delete")
+def delete_api_key(api_key: str, is_admin: bool = Depends(verify_admin)):
+    if keys_collection.delete_one({"api_key": api_key}).deleted_count > 0:
+        logs_collection.delete_many({"api_key": api_key})
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Key not found")
