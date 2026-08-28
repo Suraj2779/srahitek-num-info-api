@@ -1,188 +1,219 @@
 import os
+import io
 import time
-import duckdb
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from typing import Optional
+import requests
+import pandas as pd
+import pyarrow.parquet as pq
+from flask import Flask, request, jsonify
 
-app = FastAPI(title="SRA CyberTech Ultimate Search API")
+app = Flask(__name__)
 
-# ======== শুধু এই ডেটাসেট (যেটা কাজ করছে) ========
-DATASET_BASE = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
+# ========== কনফিগারেশন ==========
+SHARDS = range(10)  # 0-9
+BASE_URL = "https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main"
+TIMEOUT = 45  # বড় ফাইলের জন্য বেশি সময়
 
-# সব ২০টি ফাইল (Alt 0-9 + Final 0-9)
-ALL_SHARDS = [f"alt_master_shard_{i}.parquet" for i in range(10)] + [f"final_master_shard_{i}.parquet" for i in range(10)]
+# যে ফাইল সেটগুলো স্ক্যান করব (alt ও final)
+FILE_SETS = [
+    {"prefix": "alt_master_shard", "suffix": ".parquet"},
+    {"prefix": "final_master_shard", "suffix": ".parquet"},
+]
 
-# ========== ল্যান্ডিং পেজ ==========
-LANDING_HTML = """
-<!DOCTYPE html>
-<html>
-<head><title>SRA CyberTech LIVE</title>
-<style>
-body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%;}
-h1{color:#00ffcc;font-size:3em;text-shadow:0 0 20px #00ffcc;}
-.status{color:#0f0;animation:blink 1s infinite;}
-@keyframes blink{50%{opacity:0;}}
-</style>
-</head>
-<body>
-    <h1>🚀 SRA CYBERTECH</h1>
-    <p>Status: <span class="status">● ULTIMATE LIVE</span></p>
-    <p>Dataset: MRSHREY197/Hitekdatabase</p>
-    <p>Developer: Team SRA (Salman | Raj | Akash)</p>
-    <p style="color:#666;">Try: /search?mobile=9831477801 | /search?name=rahul | /search?id=835513945495</p>
-</body>
-</html>
-"""
+# যে কলামগুলোতে সার্চ করব (শুধু টেক্সট কলাম)
+SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email']
 
-@app.exception_handler(StarletteHTTPException)
-async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"status": "error", "message": str(exc.detail), "Developer": "Team SRA"}
-    )
-
-@app.get("/", response_class=HTMLResponse)
-def root():
-    return HTMLResponse(content=LANDING_HTML)
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "timestamp": time.time()}
-
-# ========== ডিবাগ ==========
-@app.get("/debug/schema")
-def debug_schema():
+# ========== হেল্পার ফাংশন ==========
+def fetch_parquet_safe(shard, prefix):
+    """একটি নির্দিষ্ট শার্ড ও প্রিফিক্সের ফাইল ডাউনলোড করে DataFrame রিটার্ন করে, এরর হলে None"""
+    url = f"{BASE_URL}/{prefix}_{shard}.parquet"
     try:
-        url = f"{DATASET_BASE}/alt_master_shard_0.parquet"
-        conn = duckdb.connect()
-        conn.execute("INSTALL httpfs;")
-        conn.execute("LOAD httpfs;")
-        conn.execute("SET http_timeout=120;")
-        query = f"SELECT * FROM read_parquet('{url}') LIMIT 1"
-        cursor = conn.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        row = cursor.fetchone()
-        conn.close()
-        return {
-            "dataset": DATASET_BASE,
-            "columns": columns,
-            "sample": dict(zip(columns, row)) if row else {}
-        }
+        response = requests.get(url, timeout=TIMEOUT)
+        response.raise_for_status()
+        table = pq.read_table(io.BytesIO(response.content))
+        df = table.to_pandas()
+        # NaN গুলোকে খালি স্ট্রিং করি, JSON ব্রেক করবে না
+        df = df.fillna("")
+        return df
     except Exception as e:
-        return {"error": str(e)}
+        # কোনো এরর (404, টাইমআউট, করাপ্ট) হলে None
+        return None
 
-# ========== মেইন সার্চ (সব প্যারামিটার সহ) ==========
-@app.get("/search")
-def search(
-    mobile: Optional[str] = Query(None, description="Search by Mobile Number"),
-    alt: Optional[str] = Query(None, description="Search by Alternate Number"),
-    name: Optional[str] = Query(None, description="Search by Name"),
-    fname: Optional[str] = Query(None, description="Search by Father Name"),
-    id: Optional[str] = Query(None, description="Search by ID"),
-    email: Optional[str] = Query(None, description="Search by Email"),
-    address: Optional[str] = Query(None, description="Search by Address"),
-    limit: int = Query(10, ge=1, le=50, description="Max records to return")
-):
-    start = time.time()
-    conditions = []
-
-    # সব প্যারামিটার চেক
-    if mobile:
-        conditions.append(f"CAST(mobile AS VARCHAR) LIKE '%{mobile}%'")
-    if alt:
-        conditions.append(f"CAST(alt AS VARCHAR) LIKE '%{alt}%'")
-    if name:
-        conditions.append(f"LOWER(name) LIKE LOWER('%{name}%')")
-    if fname:
-        conditions.append(f"LOWER(fname) LIKE LOWER('%{fname}%')")
-    if id:
-        conditions.append(f"CAST(id AS VARCHAR) LIKE '%{id}%'")
-    if email:
-        conditions.append(f"LOWER(email) LIKE LOWER('%{email}%')")
-    if address:
-        conditions.append(f"LOWER(address) LIKE LOWER('%{address}%')")
-
-    # কোনো প্যারামিটার না দিলে এরর
-    if not conditions:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "status": "error",
-                "message": "Give at least one parameter: mobile, alt, name, fname, id, email, address"
-            }
-        )
-
-    where = " AND ".join(conditions)
+def search_in_all_files(query):
+    """সব শার্ড ও সব ফাইল সেটে query খোঁজে (সব টেক্সট কলামে)"""
+    if not query or len(query) < 2:
+        return [], 0, 0, 0
+    
     all_results = []
-    failed = 0
-    scanned = 0
-
-    conn = None
-    try:
-        conn = duckdb.connect()
-        conn.execute("INSTALL httpfs;")
-        conn.execute("LOAD httpfs;")
-        conn.execute("SET memory_limit='256MB';")
-        conn.execute("SET threads=2;")
-        conn.execute("SET http_timeout=120;")
-
-        for shard in ALL_SHARDS:
-            scanned += 1
-            try:
-                url = f"{DATASET_BASE}/{shard}"
-                q = f"""
-                    SELECT *,
-                        '{shard}' AS _source
-                    FROM read_parquet('{url}')
-                    WHERE {where}
-                    LIMIT {limit}
-                """
-                cursor = conn.execute(q)
-                cols = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
-
-                if rows:
-                    formatted = [
-                        {col: (str(val) if val is not None else "") for col, val in zip(cols, row)}
-                        for row in rows
-                    ]
-                    all_results.extend(formatted)
-                    if len(all_results) >= limit:
-                        break
-            except Exception as e:
-                failed += 1
+    total_files = 0
+    successful_files = 0
+    failed_files = 0
+    
+    for shard in SHARDS:
+        for file_set in FILE_SETS:
+            prefix = file_set["prefix"]
+            total_files += 1
+            df = fetch_parquet_safe(shard, prefix)
+            if df is None:
+                failed_files += 1
                 continue
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": f"Database error: {str(e)}"}
-        )
-    finally:
-        if conn:
-            conn.close()
+            
+            successful_files += 1
+            
+            # সব টেক্সট কলামে সার্চ (কেস ইনসেনসিটিভ)
+            mask = pd.Series([False] * len(df))
+            for col in SEARCH_COLUMNS:
+                if col in df.columns:
+                    mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
+            
+            filtered_df = df[mask]
+            if not filtered_df.empty:
+                records = filtered_df.to_dict(orient='records')
+                for rec in records:
+                    rec['_shard'] = shard
+                    rec['_source'] = f"{prefix}_{shard}.parquet"
+                all_results.extend(records)
+    
+    return all_results, successful_files, failed_files, total_files
 
-    elapsed = round((time.time() - start) * 1000, 2)
+# ========== হোম পেজ ==========
+@app.route('/')
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>SRA CyberTech - ULTIMATE</title>
+    <style>body{background:#000;color:#0f0;text-align:center;padding-top:15%;font-family:monospace;} h1{color:#00ffcc;} .dev{color:#888;}</style>
+    </head>
+    <body>
+        <h1>🚀 SRA CYBERTECH ULTIMATE API</h1>
+        <p>Status: <span style="color:#0f0;">● LIVE</span></p>
+        <p>Developer: Salman | Raj | Akash</p>
+        <p class="dev">Use: /search?q=Gautam</p>
+        <p class="dev">Use: /FetchData?Number=9831477801</p>
+        <p class="dev">Scans all 20 Parquet files (alt + final)</p>
+    </body>
+    </html>
+    """
 
-    if not all_results:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "shards_checked": scanned,
-                "shards_failed": failed,
-                "time_ms": elapsed,
-                "tip": "Check /debug/schema to see actual column names"
-            }
-        )
-
-    return {
+# ========== সার্চ এন্ডপয়েন্ট (সব ফিল্ড) ==========
+@app.route('/search', methods=['GET'])
+def search_endpoint():
+    query = request.args.get('q')
+    
+    if not query or len(query) < 2:
+        return jsonify({
+            "status": "error",
+            "message": "Missing 'q' parameter or query too short (min 2 chars)",
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }), 400
+    
+    start_time = time.time()
+    results, success, failed, total = search_in_all_files(query)
+    elapsed_ms = round((time.time() - start_time) * 1000, 2)
+    
+    if not results:
+        return jsonify({
+            "status": "not_found",
+            "query": query,
+            "message": "No results found in any field",
+            "files_successful": success,
+            "files_failed": failed,
+            "total_files": total,
+            "time_ms": elapsed_ms,
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }), 404
+    
+    return jsonify({
         "status": "success",
-        "developer": "Team SRA (Salman | Raj | Akash)",
-        "shards_checked": scanned,
-        "shards_failed": failed,
-        "time_ms": elapsed,
+        "query": query,
+        "count": len(results),
+        "files_successful": success,
+        "files_failed": failed,
+        "total_files": total,
+        "time_ms": elapsed_ms,
+        "results": results,
+        "Developer": "Team SRA (Salman | Raj | Akash)"
+    })
+
+# ========== ফেচডাটা (শুধু মোবাইল/অল্ট) ==========
+@app.route('/FetchData', methods=['GET'])
+def fetch_data():
+    number = request.args.get('Number')
+    
+    if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
+        return jsonify({
+            "status": "rejected",
+            "message": "Invalid parameter. Use /FetchData?Number=01XXXXXXXXX",
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }), 400
+    
+    start_time = time.time()
+    all_results = []
+    success_files = 0
+    failed_files = 0
+    total_files = 0
+    
+    for shard in SHARDS:
+        for file_set in FILE_SETS:
+            prefix = file_set["prefix"]
+            total_files += 1
+            df = fetch_parquet_safe(shard, prefix)
+            if df is None:
+                failed_files += 1
+                continue
+            
+            success_files += 1
+            
+            # শুধু mobile ও alt কলাম চেক
+            mask = pd.Series([False] * len(df))
+            if 'mobile' in df.columns:
+                mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
+            if 'alt' in df.columns:
+                mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
+            
+            filtered_df = df[mask]
+            if not filtered_df.empty:
+                records = filtered_df.to_dict(orient='records')
+                for rec in records:
+                    rec['_shard'] = shard
+                    rec['_source'] = f"{prefix}_{shard}.parquet"
+                all_results.extend(records)
+    
+    elapsed_ms = round((time.time() - start_time) * 1000, 2)
+    
+    if not all_results:
+        return jsonify({
+            "status": "not_found",
+            "phone": number,
+            "files_successful": success_files,
+            "files_failed": failed_files,
+            "total_files": total_files,
+            "time_ms": elapsed_ms,
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }), 404
+    
+    return jsonify({
+        "status": "success",
+        "phone": number,
         "count": len(all_results),
-        "results": all_results[:limit]
-    }
+        "files_successful": success_files,
+        "files_failed": failed_files,
+        "total_files": total_files,
+        "time_ms": elapsed_ms,
+        "results": all_results,
+        "Developer": "Team SRA (Salman | Raj | Akash)"
+    })
+
+# ========== ৪০৪ হ্যান্ডলার ==========
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({
+        "status": "rejected",
+        "message": "Invalid endpoint. Use /search?q=... or /FetchData?Number=...",
+        "Developer": "Team SRA (Salman | Raj | Akash)"
+    }), 404
+
+# ========== সার্ভার চালানো ==========
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
