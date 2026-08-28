@@ -1,31 +1,34 @@
+from flask import Flask, request, jsonify
 import os
-import time
-import duckdb
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
+import io
+import requests
+import pandas as pd
+import pyarrow.parquet as pq
 
-app = FastAPI()
+app = Flask(__name__)
 
-# DuckDB কানেক্ট
-con = duckdb.connect()
-con.execute("INSTALL httpfs;")
-con.execute("LOAD httpfs;")
-
-# আপনার ডেটাসেটের ফাইল লিস্ট
-REPO_NAME = "MRSHREY197/Hitekdatabase"
-BASE_URL = f"https://huggingface.co/datasets/{REPO_NAME}/resolve/main"
-
-# ২০টি ফাইল
+# ========== কনফিগারেশন ==========
+BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 FILE_NAMES = []
 for i in range(10):
     FILE_NAMES.append(f"alt_master_shard_{i}.parquet")
     FILE_NAMES.append(f"final_master_shard_{i}.parquet")
 
-# যে কলামে সার্চ করবেন
 SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email', 'id']
 
-# ===== হেল্পার ফাংশন =====
+# ========== হেল্পার ফাংশন ==========
+def fetch_parquet_safe(file_name):
+    url = f"{BASE_URL}/{file_name}"
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        table = pq.read_table(io.BytesIO(response.content))
+        df = table.to_pandas()
+        df = df.fillna("")
+        return df
+    except Exception:
+        return None
+
 def search_in_all_files(query):
     if not query or len(query) < 2:
         return [], 0, 0
@@ -35,27 +38,23 @@ def search_in_all_files(query):
     failed = 0
     
     for file_name in FILE_NAMES:
-        url = f"{BASE_URL}/{file_name}"
-        try:
-            # DuckDB দিয়ে SQL চালান
-            conditions = []
-            for col in SEARCH_COLUMNS:
-                conditions.append(f"CAST({col} AS VARCHAR) ILIKE '%{query}%'")
-            where_clause = " OR ".join(conditions)
-            
-            sql = f"""
-                SELECT *, '{file_name}' AS _source_file
-                FROM read_parquet('{url}')
-                WHERE {where_clause}
-            """
-            df = con.execute(sql).df()
-            if not df.empty:
-                records = df.to_dict(orient='records')
-                all_results.extend(records)
-            success += 1
-        except Exception:
+        df = fetch_parquet_safe(file_name)
+        if df is None:
             failed += 1
             continue
+        success += 1
+        
+        mask = pd.Series([False] * len(df))
+        for col in SEARCH_COLUMNS:
+            if col in df.columns:
+                mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
+        
+        filtered_df = df[mask]
+        if not filtered_df.empty:
+            records = filtered_df.to_dict(orient='records')
+            for rec in records:
+                rec['_source_file'] = file_name
+            all_results.extend(records)
     
     return all_results, success, failed
 
@@ -65,108 +64,102 @@ def search_number_in_all_files(number):
     failed = 0
     
     for file_name in FILE_NAMES:
-        url = f"{BASE_URL}/{file_name}"
-        try:
-            sql = f"""
-                SELECT *, '{file_name}' AS _source_file
-                FROM read_parquet('{url}')
-                WHERE CAST(mobile AS VARCHAR) = '{number}' OR CAST(alt AS VARCHAR) = '{number}'
-            """
-            df = con.execute(sql).df()
-            if not df.empty:
-                records = df.to_dict(orient='records')
-                all_results.extend(records)
-            success += 1
-        except Exception:
+        df = fetch_parquet_safe(file_name)
+        if df is None:
             failed += 1
             continue
+        success += 1
+        
+        mask = pd.Series([False] * len(df))
+        if 'mobile' in df.columns:
+            mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
+        if 'alt' in df.columns:
+            mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
+        
+        filtered_df = df[mask]
+        if not filtered_df.empty:
+            records = filtered_df.to_dict(orient='records')
+            for rec in records:
+                rec['_source_file'] = file_name
+            all_results.extend(records)
     
     return all_results, success, failed
 
-# ===== এন্ডপয়েন্ট =====
-@app.get("/")
+# ========== এন্ডপয়েন্ট ==========
+@app.route('/')
 def home():
-    return {
-        "status": "SRA CyberTech API is LIVE 🚀",
+    return jsonify({
+        "status": "SRA CyberTech API is LIVE",
         "developer": "Team SRA (Salman | Raj | Akash)",
-        "files_found": len(FILE_NAMES),
+        "files": len(FILE_NAMES),
         "endpoints": {
             "/search?q=...": "Search in all fields",
             "/FetchData?Number=...": "Search by mobile or alt number"
         }
-    }
+    })
 
-@app.get("/search")
-def search_all_fields(q: str = Query(..., min_length=2)):
-    start = time.time()
-    results, success, failed = search_in_all_files(q)
-    elapsed = (time.time() - start) * 1000
+@app.route('/search')
+def search():
+    query = request.args.get('q')
+    if not query or len(query) < 2:
+        return jsonify({"status": "error", "message": "q parameter required (min 2 chars)"}), 400
+    
+    results, success, failed = search_in_all_files(query)
     
     if not results:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "query": q,
-                "files_successful": success,
-                "files_failed": failed,
-                "total_files": len(FILE_NAMES),
-                "time_ms": round(elapsed, 2),
-                "Developer": "Team SRA (Salman | Raj | Akash)"
-            }
-        )
+        return jsonify({
+            "status": "not_found",
+            "query": query,
+            "files_successful": success,
+            "files_failed": failed,
+            "total_files": len(FILE_NAMES),
+            "Developer": "Team SRA"
+        }), 404
     
-    return {
+    return jsonify({
         "status": "success",
-        "query": q,
+        "query": query,
         "count": len(results),
         "files_successful": success,
         "files_failed": failed,
         "total_files": len(FILE_NAMES),
-        "time_ms": round(elapsed, 2),
         "results": results,
-        "Developer": "Team SRA (Salman | Raj | Akash)"
-    }
+        "Developer": "Team SRA"
+    })
 
-@app.get("/FetchData")
-def fetch_by_number(Number: str = Query(..., min_length=10, max_length=15)):
-    start = time.time()
-    results, success, failed = search_number_in_all_files(Number)
-    elapsed = (time.time() - start) * 1000
-    
-    if not results:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "phone": Number,
-                "files_successful": success,
-                "files_failed": failed,
-                "total_files": len(FILE_NAMES),
-                "time_ms": round(elapsed, 2),
-                "Developer": "Team SRA (Salman | Raj | Akash)"
-            }
-        )
-    
-    return {
-        "status": "success",
-        "phone": Number,
-        "count": len(results),
-        "files_successful": success,
-        "files_failed": failed,
-        "total_files": len(FILE_NAMES),
-        "time_ms": round(elapsed, 2),
-        "results": results,
-        "Developer": "Team SRA (Salman | Raj | Akash)"
-    }
-
-@app.exception_handler(StarletteHTTPException)
-async def custom_404(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
+@app.route('/FetchData')
+def fetch_data():
+    number = request.args.get('Number')
+    if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
+        return jsonify({
             "status": "rejected",
-            "message": "Invalid endpoint. Use /search?q=... or /FetchData?Number=...",
-            "Developer": "Team SRA (Salman | Raj | Akash)"
-        }
-    )
+            "message": "Invalid number. Use /FetchData?Number=01XXXXXXXXX",
+            "Developer": "Team SRA"
+        }), 400
+    
+    results, success, failed = search_number_in_all_files(number)
+    
+    if not results:
+        return jsonify({
+            "status": "not_found",
+            "phone": number,
+            "files_successful": success,
+            "files_failed": failed,
+            "total_files": len(FILE_NAMES),
+            "Developer": "Team SRA"
+        }), 404
+    
+    return jsonify({
+        "status": "success",
+        "phone": number,
+        "count": len(results),
+        "files_successful": success,
+        "files_failed": failed,
+        "total_files": len(FILE_NAMES),
+        "results": results,
+        "Developer": "Team SRA"
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
