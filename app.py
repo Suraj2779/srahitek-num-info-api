@@ -9,73 +9,67 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 # ========== কনফিগারেশন ==========
-SHARDS = range(10)  # 0-9
-BASE_URL = "https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main"
-TIMEOUT = 45  # বড় ফাইলের জন্য বেশি সময়
+# নতুন ডেটাসেটের ঠিকানা
+BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
 
-# যে ফাইল সেটগুলো স্ক্যান করব (alt ও final)
-FILE_SETS = [
-    {"prefix": "alt_master_shard", "suffix": ".parquet"},
-    {"prefix": "final_master_shard", "suffix": ".parquet"},
-]
+# ২০টি ফাইলের লিস্ট (alt + final)
+FILE_NAMES = []
+for i in range(10):
+    FILE_NAMES.append(f"alt_master_shard_{i}.parquet")
+    FILE_NAMES.append(f"final_master_shard_{i}.parquet")
 
-# যে কলামগুলোতে সার্চ করব (শুধু টেক্সট কলাম)
-SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email']
+# যে কলামগুলোতে সার্চ করব
+SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email', 'id']
+
+TIMEOUT = 45  # সেকেন্ড
 
 # ========== হেল্পার ফাংশন ==========
-def fetch_parquet_safe(shard, prefix):
-    """একটি নির্দিষ্ট শার্ড ও প্রিফিক্সের ফাইল ডাউনলোড করে DataFrame রিটার্ন করে, এরর হলে None"""
-    url = f"{BASE_URL}/{prefix}_{shard}.parquet"
+def fetch_parquet_safe(file_name):
+    """একটি Parquet ফাইল ডাউনলোড করে DataFrame রিটার্ন করে, এরর হলে None"""
+    url = f"{BASE_URL}/{file_name}"
     try:
         response = requests.get(url, timeout=TIMEOUT)
         response.raise_for_status()
         table = pq.read_table(io.BytesIO(response.content))
         df = table.to_pandas()
-        # NaN গুলোকে খালি স্ট্রিং করি, JSON ব্রেক করবে না
-        df = df.fillna("")
+        df = df.fillna("")  # NaN কে খালি স্ট্রিং করি
         return df
     except Exception as e:
-        # কোনো এরর (404, টাইমআউট, করাপ্ট) হলে None
         return None
 
 def search_in_all_files(query):
-    """সব শার্ড ও সব ফাইল সেটে query খোঁজে (সব টেক্সট কলামে)"""
+    """সব ২০টি ফাইলে query খোঁজে (সব কলামে, কেস ইনসেনসিটিভ)"""
     if not query or len(query) < 2:
         return [], 0, 0, 0
     
     all_results = []
-    total_files = 0
-    successful_files = 0
-    failed_files = 0
+    success = 0
+    failed = 0
     
-    for shard in SHARDS:
-        for file_set in FILE_SETS:
-            prefix = file_set["prefix"]
-            total_files += 1
-            df = fetch_parquet_safe(shard, prefix)
-            if df is None:
-                failed_files += 1
-                continue
-            
-            successful_files += 1
-            
-            # সব টেক্সট কলামে সার্চ (কেস ইনসেনসিটিভ)
-            mask = pd.Series([False] * len(df))
-            for col in SEARCH_COLUMNS:
-                if col in df.columns:
-                    mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
-            
-            filtered_df = df[mask]
-            if not filtered_df.empty:
-                records = filtered_df.to_dict(orient='records')
-                for rec in records:
-                    rec['_shard'] = shard
-                    rec['_source'] = f"{prefix}_{shard}.parquet"
-                all_results.extend(records)
+    for file_name in FILE_NAMES:
+        df = fetch_parquet_safe(file_name)
+        if df is None:
+            failed += 1
+            continue
+        
+        success += 1
+        
+        # সব কলামে সার্চ (কেস ইনসেনসিটিভ)
+        mask = pd.Series([False] * len(df))
+        for col in SEARCH_COLUMNS:
+            if col in df.columns:
+                mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
+        
+        filtered_df = df[mask]
+        if not filtered_df.empty:
+            records = filtered_df.to_dict(orient='records')
+            for rec in records:
+                rec['_source_file'] = file_name
+            all_results.extend(records)
     
-    return all_results, successful_files, failed_files, total_files
+    return all_results, success, failed, len(FILE_NAMES)
 
-# ========== হোম পেজ ==========
+# ========== ল্যান্ডিং পেজ ==========
 @app.route('/')
 def home():
     return """
@@ -98,6 +92,7 @@ def home():
 # ========== সার্চ এন্ডপয়েন্ট (সব ফিল্ড) ==========
 @app.route('/search', methods=['GET'])
 def search_endpoint():
+    start_time = time.time()
     query = request.args.get('q')
     
     if not query or len(query) < 2:
@@ -107,9 +102,8 @@ def search_endpoint():
             "Developer": "Team SRA (Salman | Raj | Akash)"
         }), 400
     
-    start_time = time.time()
     results, success, failed, total = search_in_all_files(query)
-    elapsed_ms = round((time.time() - start_time) * 1000, 2)
+    elapsed = (time.time() - start_time) * 1000
     
     if not results:
         return jsonify({
@@ -119,7 +113,7 @@ def search_endpoint():
             "files_successful": success,
             "files_failed": failed,
             "total_files": total,
-            "time_ms": elapsed_ms,
+            "time_ms": round(elapsed, 2),
             "Developer": "Team SRA (Salman | Raj | Akash)"
         }), 404
     
@@ -130,14 +124,15 @@ def search_endpoint():
         "files_successful": success,
         "files_failed": failed,
         "total_files": total,
-        "time_ms": elapsed_ms,
+        "time_ms": round(elapsed, 2),
         "results": results,
         "Developer": "Team SRA (Salman | Raj | Akash)"
     })
 
-# ========== ফেচডাটা (শুধু মোবাইল/অল্ট) ==========
+# ========== ফেচডাটা এন্ডপয়েন্ট (মোবাইল/অল্ট) ==========
 @app.route('/FetchData', methods=['GET'])
 def fetch_data():
+    start_time = time.time()
     number = request.args.get('Number')
     
     if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
@@ -147,48 +142,42 @@ def fetch_data():
             "Developer": "Team SRA (Salman | Raj | Akash)"
         }), 400
     
-    start_time = time.time()
     all_results = []
-    success_files = 0
-    failed_files = 0
-    total_files = 0
+    success = 0
+    failed = 0
     
-    for shard in SHARDS:
-        for file_set in FILE_SETS:
-            prefix = file_set["prefix"]
-            total_files += 1
-            df = fetch_parquet_safe(shard, prefix)
-            if df is None:
-                failed_files += 1
-                continue
-            
-            success_files += 1
-            
-            # শুধু mobile ও alt কলাম চেক
-            mask = pd.Series([False] * len(df))
-            if 'mobile' in df.columns:
-                mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
-            if 'alt' in df.columns:
-                mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
-            
-            filtered_df = df[mask]
-            if not filtered_df.empty:
-                records = filtered_df.to_dict(orient='records')
-                for rec in records:
-                    rec['_shard'] = shard
-                    rec['_source'] = f"{prefix}_{shard}.parquet"
-                all_results.extend(records)
+    for file_name in FILE_NAMES:
+        df = fetch_parquet_safe(file_name)
+        if df is None:
+            failed += 1
+            continue
+        
+        success += 1
+        
+        # শুধু mobile ও alt কলামে চেক
+        mask = pd.Series([False] * len(df))
+        if 'mobile' in df.columns:
+            mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
+        if 'alt' in df.columns:
+            mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
+        
+        filtered_df = df[mask]
+        if not filtered_df.empty:
+            records = filtered_df.to_dict(orient='records')
+            for rec in records:
+                rec['_source_file'] = file_name
+            all_results.extend(records)
     
-    elapsed_ms = round((time.time() - start_time) * 1000, 2)
+    elapsed = (time.time() - start_time) * 1000
     
     if not all_results:
         return jsonify({
             "status": "not_found",
             "phone": number,
-            "files_successful": success_files,
-            "files_failed": failed_files,
-            "total_files": total_files,
-            "time_ms": elapsed_ms,
+            "files_successful": success,
+            "files_failed": failed,
+            "total_files": len(FILE_NAMES),
+            "time_ms": round(elapsed, 2),
             "Developer": "Team SRA (Salman | Raj | Akash)"
         }), 404
     
@@ -196,15 +185,15 @@ def fetch_data():
         "status": "success",
         "phone": number,
         "count": len(all_results),
-        "files_successful": success_files,
-        "files_failed": failed_files,
-        "total_files": total_files,
-        "time_ms": elapsed_ms,
+        "files_successful": success,
+        "files_failed": failed,
+        "total_files": len(FILE_NAMES),
+        "time_ms": round(elapsed, 2),
         "results": all_results,
         "Developer": "Team SRA (Salman | Raj | Akash)"
     })
 
-# ========== ৪০৪ হ্যান্ডলার ==========
+# ========== ৪০৪ এরর হ্যান্ডলার ==========
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({
