@@ -1,5 +1,7 @@
 fastapi
-uvicorn
-requests
+duckdb
+pymongo
+python-dotenv
+secrets
 pandas
-pyarrow
+uvicorn
