@@ -97,29 +97,29 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             content={
                 "status": "error",
                 "message": "API Key is missing or invalid.",
-                "Developer": "Team SRA (Salman | Raj | Akash)",
-                "Buy_API": "Contact: https://t.me/Aswatthama_0x"
+                "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
+                "Buy_API": "Contact: https://t.me/SRACyberTechPvtLtd"
             }
         )
     return JSONResponse(
         status_code=exc.status_code, 
-        content={"status": "rejected", "message": exc.detail, "Developer": "Team SRA"}
+        content={"status": "rejected", "message": exc.detail, "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"}
     )
 
-# ----------------- PUBLIC ROUTES -----------------
+# ----------------- PUBLIC ROUTES (NO HTML) -----------------
 @app.get("/", response_class=JSONResponse)
 def root_landing_page():
     return {
         "status": "Api is running",
         "message": "SRA Phone Info API is running",
-        "Developer": "Team SRA (Salman | Raj | Akash)",
-        "Buy_API": "Contact: https://t.me/Aswatthama_0x"
+        "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
+        "Channel": "https://t.me/SRACyberTechPvtLtd"
     }
 
 @app.get("/FetchData")
 def fetch_data(Number: str = Query(None), api_key: str = Depends(verify_api_key)):
     if not Number or not Number.isdigit() or len(Number) < 10 or len(Number) > 15:
-        return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid parameter.", "Developer": "Team SRA"})
+        return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid parameter.", "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"})
     
     last_digit = Number[-1]
     
@@ -129,6 +129,7 @@ def fetch_data(Number: str = Query(None), api_key: str = Depends(verify_api_key)
     alt_url = f"{base}/alt_master_shard_{last_digit}.parquet"
     
     try:
+        # Query to fetch ALL matching records
         query = f"""
             SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'
             UNION ALL
@@ -136,13 +137,15 @@ def fetch_data(Number: str = Query(None), api_key: str = Depends(verify_api_key)
         """
         raw_results = con.execute(query).df().to_dict(orient="records")
         
+        # Clean NaN values
         cleaned_results = clean_nan(raw_results)
         
+        # Group all matching rows into respective lists
         main_records = [row for row in cleaned_results if row.pop('_record_type') == 'Main']
         alt_records = [row for row in cleaned_results if row.pop('_record_type', None) == 'Alt']
         
         if not main_records and not alt_records:
-            return JSONResponse(status_code=404, content={"status": "not_found", "phone": Number, "Developer": "Team SRA"})
+            return JSONResponse(status_code=404, content={"status": "not_found", "phone": Number, "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"})
             
         return {
             "status": "success", 
@@ -152,12 +155,13 @@ def fetch_data(Number: str = Query(None), api_key: str = Depends(verify_api_key)
                 "Main_Records": main_records,
                 "Alt_Records": alt_records
             },
-            "Developer": "Team SRA (Salman | Raj | Akash)"
+            "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
+            "Channel": "https://t.me/SRACyberTechPvtLtd"
         }
     
     except Exception as e:
         print(f"DUCKDB CRASH LOG: {str(e)}")
-        return JSONResponse(status_code=500, content={"status": "error", "message": f"Data process error: {str(e)}", "Developer": "Team SRA"})
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"Data process error: {str(e)}", "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"})
 
 # ----------------- SECURE FORM LOGIN SYSTEM -----------------
 LOGIN_HTML = f"""
@@ -199,7 +203,7 @@ def admin_dashboard(request: Request, admin_auth: str = Cookie(None)):
             <div class="flex justify-between items-center border-b border-teal-500 pb-4 mb-8">
                 <h1 class="text-3xl font-bold text-teal-400">SRA Security Dashboard</h1>
                 <div class="flex gap-4 items-center">
-                    <span class="bg-teal-900 text-teal-300 px-3 py-1 rounded-full text-sm">Dev: Team SRA</span>
+                    <span class="bg-teal-900 text-teal-300 px-3 py-1 rounded-full text-sm">Dev: @SRA_CyberTech_Pvt_Ltd_Owner_bot</span>
                     <a href="{SECRET_ADMIN_PATH}/logout" class="bg-red-600 hover:bg-red-500 px-4 py-2 rounded font-bold text-sm transition-colors">Logout</a>
                 </div>
             </div>
