@@ -1,7 +1,5 @@
-fastapi
-uvicorn
-duckdb
+flask
+gunicorn
 pandas
 pyarrow
 requests
-numpy
