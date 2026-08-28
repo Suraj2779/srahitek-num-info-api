@@ -21,7 +21,7 @@ ADMIN_PASS = os.getenv("ADMIN_PASSWORD", "admin123")
 ADMIN_HASH = hashlib.sha256(f"{ADMIN_USER}:{ADMIN_PASS}".encode()).hexdigest()
 
 # Set Your Hidden Admin Path
-SECRET_ADMIN_PATH = "/nxd-secret-panel"
+SECRET_ADMIN_PATH = "/sra-secret-panel"
 
 # Initialize MongoDB
 try:
