@@ -1,1 +1,1 @@
-web: gunicorn --timeout 600 app:app
+web: uvicorn app:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 300
