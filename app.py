@@ -6,6 +6,8 @@ import math
 import os
 
 app = FastAPI(docs_url=None, redoc_url=None)
+
+# DuckDB কানেক্ট
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
@@ -22,7 +24,7 @@ def clean_nan(obj):
 @app.get("/")
 def root():
     return {
-        "status": "SRA API is running 🚀",
+        "status": "SRA API is running",
         "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
         "channel": "https://t.me/SRACyberTechPvtLtd"
     }
@@ -34,7 +36,7 @@ def fetch_data(Number: str = Query(None)):
             status_code=400,
             content={
                 "status": "rejected",
-                "message": "Invalid number. Use /FetchData?Number=01XXXXXXXXX",
+                "message": "Invalid number. Use 10-15 digits.",
                 "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"
             }
         )
@@ -45,18 +47,14 @@ def fetch_data(Number: str = Query(None)):
     alt_url = f"{base}/alt_master_shard_{last_digit}.parquet"
     
     try:
+        # কোয়েরি – _record_type যোগ করছি
         query = f"""
             SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'
             UNION ALL
             SELECT *, 'Alt' AS _record_type FROM read_parquet('{alt_url}') WHERE alt = '{Number}'
         """
-        raw_results = con.execute(query).df().to_dict(orient="records")
-        cleaned = clean_nan(raw_results)
-        
-        main_records = [r for r in cleaned if r.pop('_record_type') == 'Main']
-        alt_records = [r for r in cleaned if r.pop('_record_type') == 'Alt']
-        
-        if not main_records and not alt_records:
+        df = con.execute(query).df()
+        if df.empty:
             return JSONResponse(
                 status_code=404,
                 content={
@@ -65,6 +63,25 @@ def fetch_data(Number: str = Query(None)):
                     "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"
                 }
             )
+        
+        raw = df.to_dict(orient="records")
+        cleaned = clean_nan(raw)
+        
+        # _record_type অনুযায়ী আলাদা করি – KeyError এড়াতে
+        main_records = []
+        alt_records = []
+        for row in cleaned:
+            rec_type = row.get('_record_type')
+            if rec_type == 'Main':
+                row.pop('_record_type', None)
+                main_records.append(row)
+            elif rec_type == 'Alt':
+                row.pop('_record_type', None)
+                alt_records.append(row)
+            else:
+                # কোনো কারণে _record_type না থাকলে
+                row.pop('_record_type', None)
+                alt_records.append(row)  # ডিফল্ট Alt
         
         return {
             "status": "success",
@@ -79,6 +96,7 @@ def fetch_data(Number: str = Query(None)):
         }
     
     except Exception as e:
+        print(f"Error: {e}")
         return JSONResponse(
             status_code=500,
             content={
@@ -94,12 +112,7 @@ async def custom_404(request: Request, exc: StarletteHTTPException):
         status_code=exc.status_code,
         content={
             "status": "rejected",
-            "message": exc.detail,
+            "message": "Invalid endpoint. Use /FetchData?Number=...",
             "Developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"
         }
     )
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
