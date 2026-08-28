@@ -1,5 +1,5 @@
-flask
+fastapi
+uvicorn
+requests
 pandas
 pyarrow
-requests
-gunicorn
