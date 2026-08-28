@@ -1,3 +1,7 @@
 fastapi
-duckdb
 uvicorn
+duckdb
+pandas
+pyarrow
+requests
+numpy
