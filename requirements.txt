@@ -1,3 +1,5 @@
-fastapi
-uvicorn
-duckdb
+flask
+pandas
+pyarrow
+requests
+gunicorn
