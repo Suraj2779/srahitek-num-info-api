@@ -18,6 +18,7 @@ SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email'
 
 # ========== Hugging Face API থেকে ফাইল লিস্ট ফেচ ==========
 def fetch_parquet_files():
+    """Hugging Face API থেকে সব .parquet ফাইলের নাম নিয়ে আসে"""
     api_url = f"https://huggingface.co/api/datasets/{REPO_NAME}"
     try:
         resp = requests.get(api_url, timeout=30)
@@ -28,16 +29,21 @@ def fetch_parquet_files():
         if files:
             print(f"✅ পাওয়া গেছে {len(files)} টি Parquet ফাইল")
             return files
-        return []
+        else:
+            print("⚠️ কোনো Parquet ফাইল পাওয়া যায়নি")
+            return []
     except Exception as e:
-        print(f"⚠️ ফাইল লিস্ট ফেচ ব্যর্থ: {e}")
+        print(f"⚠️ ফাইল লিস্ট ফেচ করতে ব্যর্থ: {e}")
         fallback = []
         for i in range(10):
             fallback.append(f"alt_master_shard_{i}.parquet")
             fallback.append(f"final_master_shard_{i}.parquet")
+        print(f"⚠️ ফ্যালব্যাক ব্যবহার করা হচ্ছে: {len(fallback)} টি ফাইল")
         return fallback
 
+# অ্যাপ স্টার্ট হলে ফাইল লিস্ট লোড করুন
 FILE_NAMES = fetch_parquet_files()
+print(f"📁 মোট ফাইল: {len(FILE_NAMES)}")
 
 # ========== হেল্পার ফাংশন ==========
 def clean_nan(obj):
@@ -68,48 +74,57 @@ def fetch_parquet_safe(file_name):
 def search_in_all_files(query):
     if not query or len(query) < 2:
         return [], 0, 0
+    
     all_results = []
     success = 0
     failed = 0
+    
     for file_name in FILE_NAMES:
         df = fetch_parquet_safe(file_name)
         if df is None:
             failed += 1
             continue
         success += 1
+        
         mask = pd.Series([False] * len(df))
         for col in SEARCH_COLUMNS:
             if col in df.columns:
                 mask = mask | df[col].astype(str).str.contains(query, case=False, na=False)
+        
         filtered_df = df[mask]
         if not filtered_df.empty:
             records = filtered_df.to_dict(orient='records')
             for rec in records:
                 rec['_source_file'] = file_name
             all_results.extend(records)
+    
     return all_results, success, failed
 
 def search_number_in_all_files(number):
     all_results = []
     success = 0
     failed = 0
+    
     for file_name in FILE_NAMES:
         df = fetch_parquet_safe(file_name)
         if df is None:
             failed += 1
             continue
         success += 1
+        
         mask = pd.Series([False] * len(df))
         if 'mobile' in df.columns:
             mask = mask | df['mobile'].astype(str).str.contains(number, case=False, na=False)
         if 'alt' in df.columns:
             mask = mask | df['alt'].astype(str).str.contains(number, case=False, na=False)
+        
         filtered_df = df[mask]
         if not filtered_df.empty:
             records = filtered_df.to_dict(orient='records')
             for rec in records:
                 rec['_source_file'] = file_name
             all_results.extend(records)
+    
     return all_results, success, failed
 
 # ========== এন্ডপয়েন্ট ==========
@@ -121,16 +136,20 @@ def home():
         "files_found": len(FILE_NAMES),
         "files_list": FILE_NAMES,
         "endpoints": {
-            "/search?q=...": "Search in all fields",
+            "/search?q=...": "Search in all fields (mobile, name, fname, address, alt, circle, email, id)",
             "/FetchData?Number=...": "Search by mobile or alt number"
         }
     })
 
-@app.route('/search', methods=['GET'])
+@app.route('/search')
 def search_all_fields():
     query = request.args.get('q')
     if not query or len(query) < 2:
-        return jsonify({"status": "error", "message": "Missing or short 'q' parameter"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "Missing 'q' parameter or query too short (min 2 chars)",
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }), 400
     
     start = time.time()
     results, success, failed = search_in_all_files(query)
@@ -159,7 +178,7 @@ def search_all_fields():
         "Developer": "Team SRA (Salman | Raj | Akash)"
     })
 
-@app.route('/FetchData', methods=['GET'])
+@app.route('/FetchData')
 def fetch_by_number():
     number = request.args.get('Number')
     if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
