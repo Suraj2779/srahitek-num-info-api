@@ -1,5 +1,7 @@
 fastapi
 uvicorn
-requests
+duckdb
 pandas
 pyarrow
+requests
+numpy
