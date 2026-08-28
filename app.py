@@ -1,57 +1,83 @@
 import os
-import io
 import time
+import math
 import requests
 import pandas as pd
 import pyarrow.parquet as pq
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-app = Flask(__name__)
+app = FastAPI()
 
 # ========== কনফিগারেশন ==========
-BASE_URL = "https://huggingface.co/datasets/MRSHREY197/Hitekdatabase/resolve/main"
-
-FILE_NAMES = []
-for i in range(10):
-    FILE_NAMES.append(f"alt_master_shard_{i}.parquet")
-    FILE_NAMES.append(f"final_master_shard_{i}.parquet")
-
+REPO_NAME = "MRSHREY197/Hitekdatabase"
+BASE_URL = f"https://huggingface.co/datasets/{REPO_NAME}/resolve/main"
+TIMEOUT = 120
+MAX_RETRIES = 2
 SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email', 'id']
-TIMEOUT = 300  # ৫ মিনিট (বড় ফাইলের জন্য)
-MAX_RETRIES = 2  # কোনো ফাইল ডাউনলোডে ব্যর্থ হলে ২ বার রিট্রাই
 
-# ========== হেল্পার ফাংশন (রিট্রাই সহ) ==========
-def fetch_parquet_safe(file_name):
-    """রিট্রাই মেকানিজম সহ Parquet ডাউনলোড"""
-    url = f"{BASE_URL}/{file_name}"
+# ========== ডায়নামিক ফাইল লিস্ট ফেচ ==========
+def fetch_parquet_files():
+    """Hugging Face API থেকে আসল ফাইল নামগুলো খুঁজে বের করে"""
+    api_url = f"https://huggingface.co/api/datasets/{REPO_NAME}/refs/main"
+    try:
+        resp = requests.get(api_url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # 'tree' কী তে ফাইলের তালিকা থাকে
+        tree = data.get('tree', [])
+        if not tree and isinstance(data, list):
+            tree = data
+            
+        files = [item['path'] for item in tree if item['path'].endswith('.parquet')]
+        if files:
+            print(f"✅ পাওয়া গেছে {len(files)} টি Parquet ফাইল: {files}")
+            return files
+    except Exception as e:
+        print(f"⚠️ ফাইল লিস্ট ফেচ করতে ব্যর্থ: {e}")
     
+    # API কাজ না করলে ফ্যালব্যাক (সাধারণ নাম)
+    fallback = []
+    for i in range(10):
+        fallback.append(f"alt_master_shard_{i}.parquet")
+        fallback.append(f"final_master_shard_{i}.parquet")
+    print(f"⚠️ ফ্যালব্যাক ব্যবহার করা হচ্ছে: {fallback}")
+    return fallback
+
+# অ্যাপ স্টার্ট হলে ফাইল লিস্ট লোড করুন
+FILE_NAMES = fetch_parquet_files()
+
+# ========== হেল্পার ফাংশন ==========
+def clean_nan(obj):
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    elif isinstance(obj, dict):
+        return {k: clean_nan(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan(v) for v in obj]
+    return obj
+
+def fetch_parquet_safe(file_name):
+    url = f"{BASE_URL}/{file_name}"
     for attempt in range(MAX_RETRIES + 1):
         try:
-            response = requests.get(url, timeout=TIMEOUT, stream=True)
+            response = requests.get(url, timeout=TIMEOUT)
             response.raise_for_status()
-            
-            # স্ট্রিমিং করে ডাউনলোড (মেমোরি বাঁচায়)
-            content = b""
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    content += chunk
-            
-            table = pq.read_table(io.BytesIO(content))
+            table = pq.read_table(io.BytesIO(response.content))
             df = table.to_pandas()
             df = df.fillna("")
             return df
-            
-        except Exception as e:
+        except Exception:
             if attempt == MAX_RETRIES:
                 return None
-            time.sleep(2)  # রিট্রাই করার আগে ২ সেকেন্ড অপেক্ষা
-    
+            time.sleep(2)
     return None
 
 def search_in_all_files(query):
-    """সব ২০টি ফাইলে সার্চ"""
     if not query or len(query) < 2:
-        return [], 0, 0, 0
+        return [], 0, 0
     
     all_results = []
     success = 0
@@ -62,10 +88,8 @@ def search_in_all_files(query):
         if df is None:
             failed += 1
             continue
-        
         success += 1
         
-        # সব কলামে সার্চ
         mask = pd.Series([False] * len(df))
         for col in SEARCH_COLUMNS:
             if col in df.columns:
@@ -78,82 +102,9 @@ def search_in_all_files(query):
                 rec['_source_file'] = file_name
             all_results.extend(records)
     
-    return all_results, success, failed, len(FILE_NAMES)
+    return all_results, success, failed
 
-# ========== ল্যান্ডিং পেজ ==========
-@app.route('/')
-def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><title>SRA CyberTech - ULTIMATE</title>
-    <style>body{background:#000;color:#0f0;text-align:center;padding-top:15%;font-family:monospace;} h1{color:#00ffcc;} .dev{color:#888;}</style>
-    </head>
-    <body>
-        <h1>🚀 SRA CYBERTECH ULTIMATE API</h1>
-        <p>Status: <span style="color:#0f0;">● LIVE</span></p>
-        <p>Developer: Salman | Raj | Akash</p>
-        <p class="dev">Use: /search?q=Gautam</p>
-        <p class="dev">Use: /FetchData?Number=9831477801</p>
-        <p class="dev">Scans all 20 Parquet files (alt + final)</p>
-        <p class="dev" style="color:#ff0;">Timeout: 300s | Retry: 2</p>
-    </body>
-    </html>
-    """
-
-# ========== সার্চ এন্ডপয়েন্ট ==========
-@app.route('/search', methods=['GET'])
-def search_endpoint():
-    start_time = time.time()
-    query = request.args.get('q')
-    
-    if not query or len(query) < 2:
-        return jsonify({
-            "status": "error",
-            "message": "Missing 'q' parameter or query too short (min 2 chars)",
-            "Developer": "Team SRA (Salman | Raj | Akash)"
-        }), 400
-    
-    results, success, failed, total = search_in_all_files(query)
-    elapsed = (time.time() - start_time) * 1000
-    
-    if not results:
-        return jsonify({
-            "status": "not_found",
-            "query": query,
-            "message": "No results found in any field",
-            "files_successful": success,
-            "files_failed": failed,
-            "total_files": total,
-            "time_ms": round(elapsed, 2),
-            "Developer": "Team SRA (Salman | Raj | Akash)"
-        }), 404
-    
-    return jsonify({
-        "status": "success",
-        "query": query,
-        "count": len(results),
-        "files_successful": success,
-        "files_failed": failed,
-        "total_files": total,
-        "time_ms": round(elapsed, 2),
-        "results": results,
-        "Developer": "Team SRA (Salman | Raj | Akash)"
-    })
-
-# ========== ফেচডাটা এন্ডপয়েন্ট ==========
-@app.route('/FetchData', methods=['GET'])
-def fetch_data():
-    start_time = time.time()
-    number = request.args.get('Number')
-    
-    if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
-        return jsonify({
-            "status": "rejected",
-            "message": "Invalid parameter. Use /FetchData?Number=01XXXXXXXXX",
-            "Developer": "Team SRA (Salman | Raj | Akash)"
-        }), 400
-    
+def search_number_in_all_files(number):
     all_results = []
     success = 0
     failed = 0
@@ -163,7 +114,6 @@ def fetch_data():
         if df is None:
             failed += 1
             continue
-        
         success += 1
         
         mask = pd.Series([False] * len(df))
@@ -179,40 +129,93 @@ def fetch_data():
                 rec['_source_file'] = file_name
             all_results.extend(records)
     
-    elapsed = (time.time() - start_time) * 1000
+    return all_results, success, failed
+
+# ========== এন্ডপয়েন্ট ==========
+@app.get("/")
+def home():
+    return {
+        "status": "SRA CyberTech API is LIVE",
+        "developer": "Team SRA (Salman | Raj | Akash)",
+        "files_found": len(FILE_NAMES),
+        "files_list": FILE_NAMES[:5],  # প্রথম ৫টা দেখাচ্ছি
+        "endpoints": {
+            "/search?q=...": "Search in all fields",
+            "/FetchData?Number=...": "Search by mobile or alt number"
+        }
+    }
+
+@app.get("/search")
+def search_all_fields(q: str = Query(..., min_length=2, description="Search term")):
+    start = time.time()
+    results, success, failed = search_in_all_files(q)
+    elapsed = (time.time() - start) * 1000
     
-    if not all_results:
-        return jsonify({
-            "status": "not_found",
-            "phone": number,
-            "files_successful": success,
-            "files_failed": failed,
-            "total_files": len(FILE_NAMES),
-            "time_ms": round(elapsed, 2),
-            "Developer": "Team SRA (Salman | Raj | Akash)"
-        }), 404
+    if not results:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "not_found",
+                "query": q,
+                "files_successful": success,
+                "files_failed": failed,
+                "total_files": len(FILE_NAMES),
+                "time_ms": round(elapsed, 2),
+                "Developer": "Team SRA (Salman | Raj | Akash)"
+            }
+        )
     
-    return jsonify({
+    return {
         "status": "success",
-        "phone": number,
-        "count": len(all_results),
+        "query": q,
+        "count": len(results),
         "files_successful": success,
         "files_failed": failed,
         "total_files": len(FILE_NAMES),
         "time_ms": round(elapsed, 2),
-        "results": all_results,
+        "results": clean_nan(results),
         "Developer": "Team SRA (Salman | Raj | Akash)"
-    })
+    }
 
-# ========== ৪০৪ এরর হ্যান্ডলার ==========
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        "status": "rejected",
-        "message": "Invalid endpoint. Use /search?q=... or /FetchData?Number=...",
+@app.get("/FetchData")
+def fetch_by_number(Number: str = Query(..., min_length=10, max_length=15, description="Mobile number")):
+    start = time.time()
+    results, success, failed = search_number_in_all_files(Number)
+    elapsed = (time.time() - start) * 1000
+    
+    if not results:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "not_found",
+                "phone": Number,
+                "files_successful": success,
+                "files_failed": failed,
+                "total_files": len(FILE_NAMES),
+                "time_ms": round(elapsed, 2),
+                "Developer": "Team SRA (Salman | Raj | Akash)"
+            }
+        )
+    
+    return {
+        "status": "success",
+        "phone": Number,
+        "count": len(results),
+        "files_successful": success,
+        "files_failed": failed,
+        "total_files": len(FILE_NAMES),
+        "time_ms": round(elapsed, 2),
+        "results": clean_nan(results),
         "Developer": "Team SRA (Salman | Raj | Akash)"
-    }), 404
+    }
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+@app.exception_handler(StarletteHTTPException)
+async def custom_404(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "rejected",
+            "message": "Invalid endpoint. Use /search?q=... or /FetchData?Number=...",
+            "Developer": "Team SRA (Salman | Raj | Akash)"
+        }
+    )
