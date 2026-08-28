@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import math
 import requests
@@ -17,37 +18,40 @@ TIMEOUT = 120
 MAX_RETRIES = 2
 SEARCH_COLUMNS = ['mobile', 'name', 'fname', 'address', 'alt', 'circle', 'email', 'id']
 
-# ========== ডায়নামিক ফাইল লিস্ট ফেচ ==========
+# ========== Hugging Face API থেকে ফাইল লিস্ট ফেচ ==========
 def fetch_parquet_files():
-    """Hugging Face API থেকে আসল ফাইল নামগুলো খুঁজে বের করে"""
-    api_url = f"https://huggingface.co/api/datasets/{REPO_NAME}/refs/main"
+    """Hugging Face API থেকে সব .parquet ফাইলের নাম নিয়ে আসে"""
+    api_url = f"https://huggingface.co/api/datasets/{REPO_NAME}"
     try:
         resp = requests.get(api_url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         
-        # 'tree' কী তে ফাইলের তালিকা থাকে
-        tree = data.get('tree', [])
-        if not tree and isinstance(data, list):
-            tree = data
-            
-        files = [item['path'] for item in tree if item['path'].endswith('.parquet')]
+        # 'siblings' কী তে সব ফাইলের তালিকা থাকে
+        siblings = data.get('siblings', [])
+        files = [item['rfilename'] for item in siblings if item['rfilename'].endswith('.parquet')]
+        
         if files:
-            print(f"✅ পাওয়া গেছে {len(files)} টি Parquet ফাইল: {files}")
+            print(f"✅ পাওয়া গেছে {len(files)} টি Parquet ফাইল")
             return files
+        else:
+            print("⚠️ কোনো Parquet ফাইল পাওয়া যায়নি")
+            return []
+            
     except Exception as e:
         print(f"⚠️ ফাইল লিস্ট ফেচ করতে ব্যর্থ: {e}")
-    
-    # API কাজ না করলে ফ্যালব্যাক (সাধারণ নাম)
-    fallback = []
-    for i in range(10):
-        fallback.append(f"alt_master_shard_{i}.parquet")
-        fallback.append(f"final_master_shard_{i}.parquet")
-    print(f"⚠️ ফ্যালব্যাক ব্যবহার করা হচ্ছে: {fallback}")
-    return fallback
+        # API কাজ না করলে ফ্যালব্যাক
+        fallback = []
+        for i in range(10):
+            fallback.append(f"alt_master_shard_{i}.parquet")
+            fallback.append(f"final_master_shard_{i}.parquet")
+        print(f"⚠️ ফ্যালব্যাক ব্যবহার করা হচ্ছে: {len(fallback)} টি ফাইল")
+        return fallback
 
 # অ্যাপ স্টার্ট হলে ফাইল লিস্ট লোড করুন
 FILE_NAMES = fetch_parquet_files()
+print(f"📁 মোট ফাইল: {len(FILE_NAMES)}")
+print(f"📄 ফাইলসমূহ: {FILE_NAMES}")
 
 # ========== হেল্পার ফাংশন ==========
 def clean_nan(obj):
@@ -69,7 +73,7 @@ def fetch_parquet_safe(file_name):
             df = table.to_pandas()
             df = df.fillna("")
             return df
-        except Exception:
+        except Exception as e:
             if attempt == MAX_RETRIES:
                 return None
             time.sleep(2)
@@ -135,12 +139,12 @@ def search_number_in_all_files(number):
 @app.get("/")
 def home():
     return {
-        "status": "SRA CyberTech API is LIVE",
+        "status": "SRA CyberTech API is LIVE 🚀",
         "developer": "Team SRA (Salman | Raj | Akash)",
         "files_found": len(FILE_NAMES),
-        "files_list": FILE_NAMES[:5],  # প্রথম ৫টা দেখাচ্ছি
+        "files_list": FILE_NAMES,
         "endpoints": {
-            "/search?q=...": "Search in all fields",
+            "/search?q=...": "Search in all fields (mobile, name, fname, address, alt, circle, email, id)",
             "/FetchData?Number=...": "Search by mobile or alt number"
         }
     }
