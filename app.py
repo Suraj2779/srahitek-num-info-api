@@ -11,29 +11,32 @@ con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
-# ProPortalx ডেটাসেটের ৯৬টা শার্ড
 base = "https://huggingface.co/datasets/ProPortalx/Telegram-Database/resolve/refs%2Fconvert%2Fparquet/default/train/"
 shard_urls = [f"{base}{i:04d}.parquet" for i in range(96)]
+
+# ✅ নতুন কোড চেক করার জন্য পিং এন্ডপয়েন্ট
+@app.get("/ping")
+def ping():
+    return {"message": "New code is running", "version": "v2.0"}
 
 @app.get("/")
 def root():
     return {"status": "ProPortalx TG API is running", "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"}
 
-# Request থেকে ডিরেক্টলি ভ্যালু নেবে, তাই user_id/account_id দুটোই কাজ করবে
+# ✅ বুলেটপ্রুফ: Request থেকে সরাসরি value নিচ্ছে
 @app.get("/FetchID")
 def fetch_id(request: Request):
     target_id = request.query_params.get('account_id') or request.query_params.get('user_id')
-
+    
     if not target_id or not target_id.isdigit():
         return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid ID. Only digits allowed."})
 
-    # ১০টা করে গ্রুপে সার্চ
+    # ৯৬টা শার্ডকে ১০টা করে গ্রুপে ভাগ করা হয়েছে
     for i in range(0, len(shard_urls), 10):
         chunk = shard_urls[i:i+10]
         url_list_str = "[" + ",".join(f"'{url}'" for url in chunk) + "]"
 
         try:
-            # ফোন ও অ্যাকাউন্ট আইডি স্ট্রিং, তাই কোটেশন লাগবে
             query = f"SELECT * FROM read_parquet({url_list_str}) WHERE account_id = '{target_id}' LIMIT 1"
             df = con.execute(query).df()
 
