@@ -1,6 +1,6 @@
 import duckdb
 import math
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -19,11 +19,11 @@ shard_urls = [f"{base}{i:04d}.parquet" for i in range(96)]
 def root():
     return {"status": "ProPortalx TG API is running", "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"}
 
-# ✅ একদম ভুলপ্রুফ: user_id অথবা account_id দুটোই ধরবে
+# ✅ বুলেটপ্রুফ Endpoint: Request থেকে সরাসরি value নিচ্ছে
 @app.get("/FetchID")
-def fetch_id(user_id: str = Query(None), account_id: str = Query(None)):
-    # দুটো প্যারামিটার চেক করা হচ্ছে
-    target_id = user_id if user_id else account_id
+def fetch_id(request: Request):
+    # Query string থেকে খোঁজা হচ্ছে
+    target_id = request.query_params.get('account_id') or request.query_params.get('user_id')
     
     if not target_id or not target_id.isdigit():
         return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid ID. Only digits allowed."})
