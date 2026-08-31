@@ -6,7 +6,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
-# DuckDB কানেক্ট ও HTTPFS চালু (রিমোট Parquet পড়ার জন্য)
+# DuckDB কানেক্ট ও HTTPFS চালু
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
@@ -19,21 +19,23 @@ shard_urls = [f"{base}{i:04d}.parquet" for i in range(96)]
 def root():
     return {"status": "ProPortalx TG API is running", "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot"}
 
-# ✅ শুধুমাত্র account_id দিয়ে সার্চ করার Endpoint
+# ✅ একদম ভুলপ্রুফ: user_id অথবা account_id দুটোই ধরবে
 @app.get("/FetchID")
-def fetch_id(account_id: str = Query(None)):
-    if not account_id or not account_id.isdigit():
+def fetch_id(user_id: str = Query(None), account_id: str = Query(None)):
+    # দুটো প্যারামিটার চেক করা হচ্ছে
+    target_id = user_id if user_id else account_id
+    
+    if not target_id or not target_id.isdigit():
         return JSONResponse(status_code=400, content={"status": "rejected", "message": "Invalid ID. Only digits allowed."})
 
     # ৯৬টা শার্ডকে ১০টা করে গ্রুপে ভাগ করা হয়েছে (টাইমআউট ও RAM বাঁচাতে)
     for i in range(0, len(shard_urls), 10):
         chunk = shard_urls[i:i+10]
-        # DuckDB-কে URL লিস্ট দেওয়ার ফরম্যাট
         url_list_str = "[" + ",".join(f"'{url}'" for url in chunk) + "]"
 
         try:
-            # account_id স্ট্রিং, তাই কোয়েরিতে সিঙ্গেল কোটেশন ('{account_id}') লাগবে
-            query = f"SELECT * FROM read_parquet({url_list_str}) WHERE account_id = '{account_id}' LIMIT 1"
+            # target_id স্ট্রিং, তাই সিঙ্গেল কোটেশন ('{target_id}') লাগবে
+            query = f"SELECT * FROM read_parquet({url_list_str}) WHERE account_id = '{target_id}' LIMIT 1"
             df = con.execute(query).df()
 
             if not df.empty:
@@ -47,7 +49,7 @@ def fetch_id(account_id: str = Query(None)):
             # কোনো শার্ডে সাময়িক সমস্যা হলে, পরের গ্রুপে চলে যাও
             continue
 
-    return JSONResponse(status_code=404, content={"status": "not_found", "id": account_id})
+    return JSONResponse(status_code=404, content={"status": "not_found", "id": target_id})
 
 @app.exception_handler(StarletteHTTPException)
 async def custom_404(request: Request, exc: StarletteHTTPException):
