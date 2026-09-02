@@ -7,7 +7,11 @@ import os
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
-# 🚀 VERCEL FIX - /tmp ही एकमात्र writable folder है
+# 🚀 VERCEL FIXES
+# 1. DuckDB को home directory बताएँ (Vercel में HOME missing है)
+os.environ['DUCKDB_HOME'] = '/tmp'
+
+# 2. Extension install करने के लिए writable folder
 EXTENSION_DIR = "/tmp/duckdb_ext"
 os.makedirs(EXTENSION_DIR, exist_ok=True)
 duckdb.default_extension_directory = EXTENSION_DIR
