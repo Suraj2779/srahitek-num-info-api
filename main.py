@@ -7,7 +7,12 @@ import os
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
-# DuckDB কানেক্ট
+# 🚀 VERCEL FIX - /tmp ही एकमात्र writable folder है
+EXTENSION_DIR = "/tmp/duckdb_ext"
+os.makedirs(EXTENSION_DIR, exist_ok=True)
+duckdb.default_extension_directory = EXTENSION_DIR
+
+# अब DuckDB connect करें और httpfs load करें
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
@@ -47,7 +52,6 @@ def fetch_data(Number: str = Query(None)):
     alt_url = f"{base}/alt_master_shard_{last_digit}.parquet"
     
     try:
-        # কোয়েরি – _record_type যোগ করছি
         query = f"""
             SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'
             UNION ALL
@@ -67,7 +71,6 @@ def fetch_data(Number: str = Query(None)):
         raw = df.to_dict(orient="records")
         cleaned = clean_nan(raw)
         
-        # _record_type অনুযায়ী আলাদা করি – KeyError এড়াতে
         main_records = []
         alt_records = []
         for row in cleaned:
@@ -79,9 +82,8 @@ def fetch_data(Number: str = Query(None)):
                 row.pop('_record_type', None)
                 alt_records.append(row)
             else:
-                # কোনো কারণে _record_type না থাকলে
                 row.pop('_record_type', None)
-                alt_records.append(row)  # ডিফল্ট Alt
+                alt_records.append(row)
         
         return {
             "status": "success",
