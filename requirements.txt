@@ -1,4 +1,5 @@
 fastapi
+uvicorn
 duckdb
 pandas
-uvicorn
+pyarrow
