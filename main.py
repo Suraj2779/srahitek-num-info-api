@@ -4,22 +4,32 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
 import math
 import os
+import threading
 
 app = FastAPI(docs_url=None, redoc_url=None)
 
-# 🚀 VERCEL FIXES
-# 1. DuckDB को home directory बताएँ (Vercel में HOME missing है)
+# Vercel-specific paths
 os.environ['DUCKDB_HOME'] = '/tmp'
-
-# 2. Extension install करने के लिए writable folder
 EXTENSION_DIR = "/tmp/duckdb_ext"
 os.makedirs(EXTENSION_DIR, exist_ok=True)
-duckdb.default_extension_directory = EXTENSION_DIR
 
-# अब DuckDB connect करें और httpfs load करें
-con = duckdb.connect()
-con.execute("INSTALL httpfs;")
-con.execute("LOAD httpfs;")
+# Global connection variable (lazy loaded)
+_conn = None
+_conn_lock = threading.Lock()
+
+def get_connection():
+    """Lazily initialize DuckDB with httpfs extension"""
+    global _conn
+    if _conn is None:
+        with _conn_lock:
+            if _conn is None:
+                # Set extension directory before connecting
+                duckdb.default_extension_directory = EXTENSION_DIR
+                _conn = duckdb.connect()
+                # Install and load httpfs (first time will download)
+                _conn.execute("INSTALL httpfs;")
+                _conn.execute("LOAD httpfs;")
+    return _conn
 
 def clean_nan(obj):
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
@@ -37,6 +47,17 @@ def root():
         "developer": "@SRA_CyberTech_Pvt_Ltd_Owner_bot",
         "channel": "https://t.me/SRACyberTechPvtLtd"
     }
+
+@app.get("/warmup")
+def warmup():
+    """Call this endpoint to pre-load DuckDB and extension (avoids timeout on real query)"""
+    try:
+        con = get_connection()
+        # Simple query to ensure connection works
+        con.execute("SELECT 1").fetchall()
+        return {"status": "warmed up"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/FetchData")
 def fetch_data(Number: str = Query(None)):
@@ -56,6 +77,7 @@ def fetch_data(Number: str = Query(None)):
     alt_url = f"{base}/alt_master_shard_{last_digit}.parquet"
     
     try:
+        con = get_connection()  # Lazy init here
         query = f"""
             SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'
             UNION ALL
